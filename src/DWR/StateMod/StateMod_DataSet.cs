@@ -1,0 +1,8642 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Text;
+using System.IO;
+
+// StateMod_DataSet - this class manages data components in a StateMod data set
+
+/* NoticeStart
+
+CDSS Models Java Library
+CDSS Models Java Library is a part of Colorado's Decision Support Systems (CDSS)
+Copyright (C) 1994-2019 Colorado Department of Natural Resources
+
+CDSS Models Java Library is free software:  you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    CDSS Models Java Library is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with CDSS Models Java Library.  If not, see <https://www.gnu.org/licenses/>.
+
+NoticeEnd */
+
+namespace DWR.StateMod
+{
+
+	using StateCU_IrrigationPracticeTS = DWR.StateCU.StateCU_IrrigationPracticeTS;
+	using StateCU_Location = DWR.StateCU.StateCU_Location;
+	using DayTS = RTi.TS.DayTS;
+	using MonthTS = RTi.TS.MonthTS;
+	using TS = RTi.TS.TS;
+	using TSIdent = RTi.TS.TSIdent;
+	using CheckFile = RTi.Util.IO.CheckFile;
+	using DataSet = RTi.Util.IO.DataSet;
+	using DataSetComponent = RTi.Util.IO.DataSetComponent;
+	using IOUtil = RTi.Util.IO.IOUtil;
+	using ProcessListener = RTi.Util.IO.ProcessListener;
+	using Prop = RTi.Util.IO.Prop;
+	using PropList = RTi.Util.IO.PropList;
+	using Message = RTi.Util.Message.Message;
+	using StringUtil = RTi.Util.String.StringUtil;
+	using DateTime = RTi.Util.Time.DateTime;
+	using StopWatch = RTi.Util.Time.StopWatch;
+	using TimeInterval = RTi.Util.Time.TimeInterval;
+	using TimeUtil = RTi.Util.Time.TimeUtil;
+	using YearType = RTi.Util.Time.YearType;
+
+	/// <summary>
+	/// This StateMod_DataSet class manages data components in a StateMod data set, 
+	/// essentially managing the list of components from the response file.
+	/// Typically, each component corresponds to a file.  A list of components is
+	/// maintained and is displayed by StateMod_DataSetManager.  The known issues with the class are:
+	/// <ol>
+	/// <li>	The stream gage/estimate station migration is not complete.  Data sets typically still use *ris
+	/// rather than the separate files for gage and estimate stations.</li>
+	/// <li>	The separate list files for subsets of station data (e.g., efficiencies) has not been implemented.</li>
+	/// </ol>
+	/// </summary>
+	public class StateMod_DataSet : DataSet
+	{
+
+	/// <summary>
+	/// Cubic-feet per second.  Potential parameter in setIresop.
+	/// </summary>
+	public const int SM_CFS = 1;
+	/// <summary>
+	/// Acre-feet per second.  Potential parameter in setIresop.
+	/// </summary>
+	public const int SM_ACFT = 2;
+	/// <summary>
+	/// Kilo Acre-feet per second.  Potential parameter in setIresop.
+	/// </summary>
+	public const int SM_KACFT = 3;
+	/// <summary>
+	/// CFS for daily, ACFT for monthly.  Potential parameter in setIresop.
+	/// </summary>
+	public const int SM_CFS_ACFT = 4;
+	/// <summary>
+	/// Cubic meters per second.  Potential parameter in setIresop.
+	/// </summary>
+	public const int SM_CMS = 5;
+
+	/// <summary>
+	/// Monthly data.  Potential parameter in setMoneva.
+	/// </summary>
+	public const int SM_MONTHLY = 0;
+	/// <summary>
+	/// Average data.  Potential parameter in setMoneva.
+	/// </summary>
+	public const int SM_AVERAGE = 1;
+
+	/// <summary>
+	/// Average data.  Potential parameter in setIopflo.
+	/// </summary>
+	public const int SM_TOT = 1;
+	/// <summary>
+	/// Gains data.  Potential parameter in setIopflo.
+	/// </summary>
+	public const int SM_GAINS = 2;
+
+	public readonly int WAIT = 0;
+	public readonly int READY = 1;
+
+	private IList<ProcessListener> __processListeners = null;
+	/// <summary>
+	/// Indicates whether time series are read when reading the data set.  This was put in place when software
+	/// performance was slow but generally now it is not an issue.  Leave in for some period but phase out if
+	/// performance is not an issue.
+	/// </summary>
+	private bool __readTimeSeries = true;
+	/// <summary>
+	/// String indicating blank file name - allowed to be a duplicate.
+	/// </summary>
+	public readonly string BLANK_FILE_NAME = "";
+	/// <summary>
+	/// Appended to some daily time series data types to indicate an estimated time series.
+	/// </summary>
+	private readonly string __ESTIMATED = "Estimated";
+
+	// TODO - SAM - StateMod data set types are not the same as StateCU and may not be needed at all.
+
+	/// <summary>
+	/// The StateMod data set type is unknown.
+	/// </summary>
+	public const int TYPE_UNKNOWN = 0;
+	public const string NAME_UNKNOWN = "Unknown";
+
+	// TODO - Start SAM new definitions (indent to illustrate groups).
+
+	/// <summary>
+	/// Use for initialization, if needed.
+	/// </summary>
+	public const int COMP_UNKNOWN = -1;
+	/// <summary>
+	/// Used when defining other nodes in the network, via the GUI.
+	/// </summary>
+	public const int COMP_OTHER_NODE = -5;
+
+	// The following should be sequential from 0 because they have lookup positions in DataSet arrays.
+	//
+	// Some of the following values are for sub-components (e.g., delay table
+	// assignment for diversions).  These are typically one-to-many data items that
+	// are managed with a component but may need to be displayed separately.  The
+	// sub-components have numbers that are the main component*100 + N.  These
+	// values are checked in methods like lookupComponentName() but do not have sequential arrays.
+	//
+	// TODO SAM 2005-01-19 - Evaluate whether sub-components should be handled in the arrays.
+
+	public const int COMP_CONTROL_GROUP = 0, COMP_RESPONSE = 1, COMP_CONTROL = 2, COMP_OUTPUT_REQUEST = 3, COMP_REACH_DATA = 4, COMP_CONSUMPTIVE_USE_GROUP = 5, COMP_STATECU_STRUCTURE = 6, COMP_IRRIGATION_PRACTICE_TS_YEARLY = 7, COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY = 8, COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY = 9, COMP_STREAMGAGE_GROUP = 10, COMP_STREAMGAGE_STATIONS = 11, COMP_STREAMGAGE_HISTORICAL_TS_MONTHLY = 12, COMP_STREAMGAGE_HISTORICAL_TS_DAILY = 13, COMP_STREAMGAGE_NATURAL_FLOW_TS_MONTHLY = 14, COMP_STREAMGAGE_NATURAL_FLOW_TS_DAILY = 15, COMP_DELAY_TABLE_MONTHLY_GROUP = 16, COMP_DELAY_TABLES_MONTHLY = 17, COMP_DELAY_TABLE_DAILY_GROUP = 18, COMP_DELAY_TABLES_DAILY = 19, COMP_DIVERSION_GROUP = 20, COMP_DIVERSION_STATIONS = 21, COMP_DIVERSION_STATION_DELAY_TABLES = 2101, COMP_DIVERSION_STATION_COLLECTIONS = 2102, COMP_DIVERSION_RIGHTS = 22, COMP_DIVERSION_TS_MONTHLY = 23, COMP_DIVERSION_TS_DAILY = 24, COMP_DEMAND_TS_MONTHLY = 25, COMP_DEMAND_TS_OVERRIDE_MONTHLY = 26, COMP_DEMAND_TS_AVERAGE_MONTHLY = 27, COMP_DEMAND_TS_DAILY = 28, COMP_PRECIPITATION_GROUP = 29, COMP_PRECIPITATION_TS_MONTHLY = 30, COMP_PRECIPITATION_TS_YEARLY = 31, COMP_EVAPORATION_GROUP = 32, COMP_EVAPORATION_TS_MONTHLY = 33, COMP_EVAPORATION_TS_YEARLY = 34, COMP_RESERVOIR_GROUP = 35, COMP_RESERVOIR_STATIONS = 36, COMP_RESERVOIR_STATION_ACCOUNTS = 3601, COMP_RESERVOIR_STATION_PRECIP_STATIONS = 3602, COMP_RESERVOIR_STATION_EVAP_STATIONS = 3603, COMP_RESERVOIR_STATION_CURVE = 3604, COMP_RESERVOIR_STATION_COLLECTIONS = 3605, COMP_RESERVOIR_RIGHTS = 37, COMP_RESERVOIR_CONTENT_TS_MONTHLY = 38, COMP_RESERVOIR_CONTENT_TS_DAILY = 39, COMP_RESERVOIR_TARGET_TS_MONTHLY = 40, COMP_RESERVOIR_TARGET_TS_DAILY = 41, COMP_RESERVOIR_RETURN = 42, COMP_INSTREAM_GROUP = 43, COMP_INSTREAM_STATIONS = 44, COMP_INSTREAM_RIGHTS = 45, COMP_INSTREAM_DEMAND_TS_MONTHLY = 46, COMP_INSTREAM_DEMAND_TS_AVERAGE_MONTHLY = 47, COMP_INSTREAM_DEMAND_TS_DAILY = 48, COMP_WELL_GROUP = 49, COMP_WELL_STATIONS = 50, COMP_WELL_STATION_DELAY_TABLES = 5001, COMP_WELL_STATION_DEPLETION_TABLES = 5002, COMP_WELL_STATION_COLLECTIONS = 5003, COMP_WELL_RIGHTS = 51, COMP_WELL_PUMPING_TS_MONTHLY = 52, COMP_WELL_PUMPING_TS_DAILY = 53, COMP_WELL_DEMAND_TS_MONTHLY = 54, COMP_WELL_DEMAND_TS_DAILY = 55, COMP_PLAN_GROUP = 56, COMP_PLANS = 57, COMP_PLAN_WELL_AUGMENTATION = 58, COMP_PLAN_RETURN = 59, COMP_STREAMESTIMATE_GROUP = 60, COMP_STREAMESTIMATE_STATIONS = 61, COMP_STREAMESTIMATE_COEFFICIENTS = 62, COMP_STREAMESTIMATE_NATURAL_FLOW_TS_MONTHLY = 63, COMP_STREAMESTIMATE_NATURAL_FLOW_TS_DAILY = 64, COMP_RIVER_NETWORK_GROUP = 65, COMP_RIVER_NETWORK = 66, COMP_NETWORK = 67, COMP_OPERATION_GROUP = 68, COMP_OPERATION_RIGHTS = 69, COMP_DOWNSTREAM_CALL_TS_DAILY = 70, COMP_SANJUAN_RIP = 71, COMP_RIO_GRANDE_SPILL = 72, COMP_GEOVIEW_GROUP = 73, COMP_GEOVIEW = 74;
+
+	// The data set component names, including the component groups.  Subcomponent
+	// names are defined after this array and are currently treated as special cases.
+	private static string[] __component_names = new string[] {"Control Data", "Response", "Control", "Output Request", "Reach Data", "Consumptive Use Data", "StateCU Structure", "Irrigation Practice TS (Yearly)", "Consumptive Water Requirement TS (Monthly)", "Consumptive Water Requirement TS (Daily)", "Stream Gage Data", "Stream Gage Stations", "Stream Gage Historical TS (Monthly)", "Stream Gage Historical TS (Daily)", "Stream Gage Natural Flow TS (Monthly)", "Stream Gage Natural Flow TS (Daily)", "Delay Table (Monthly) Data", "Delay Tables (Monthly)", "Delay Table (Daily) Data", "Delay Tables (Daily)", "Diversion Data", "Diversion Stations", "Diversion Rights", "Diversion Historical TS (Monthly)", "Diversion Historical TS (Daily)", "Diversion Demand TS (Monthly)", "Diversion Demand TS Override (Monthly)", "Diversion Demand TS (Average Monthly)", "Diversion Demand TS (Daily)", "Precipitation Data", "Precipitation Time Series (Monthly)", "Precipitation Time Series (Yearly)", "Evaporation Data", "Evaporation Time Series (Monthly)", "Evaporation Time Series (Yearly)", "Reservoir Data", "Reservoir Stations", "Reservoir Rights", "Reservoir Content TS, End of Month (Monthly)", "Reservoir Content TS, End of Day (Daily)", "Reservoir Target TS (Monthly)", "Reservoir Target TS (Daily)", "Reservoir Return Flows", "Instream Flow Data", "Instream Flow Stations", "Instream Flow Rights", "Instream Flow Demand TS (Monthly)", "Instream Flow Demand TS (Average Monthly)", "Instream Flow Demand TS (Daily)", "Well Data", "Well Stations", "Well Rights", "Well Historical Pumping TS (Monthly)", "Well Historical Pumping TS (Daily)", "Well Demand TS (Monthly)", "Well Demand TS (Daily)", "Plan Data", "Plans", "Plan Well Augmentation Data", "Plan Return Flows", "Stream Estimate Data", "Stream Estimate Stations", "Stream Estimate Coefficients", "Stream Estimate Natural Flow TS (Monthly)", "Stream Estimate Natural Flow TS (Daily)", "River Network Data", "River Network", "Network (Graphical)", "Operational Data", "Operational Rights", "Downstream Call Time Series (Daily)", "San Juan Sediment Recovery Plan", "Rio Grande Spill (Monthly)", "Spatial Data", "GeoView Project"};
+
+	/// <summary>
+	/// Subcomponent names used with lookupComponentName().  These are special
+	/// cases for labels and displays but the data are managed with a component
+	/// listed above.  Make private to force handling through lookup methods.
+	/// </summary>
+	private const string __COMPNAME_DIVERSION_STATION_DELAY_TABLES = "Diversion Station Delay Table Assignment", __COMPNAME_DIVERSION_STATION_COLLECTIONS = "Diversion Station Collection Definitions", __COMPNAME_RESERVOIR_STATION_ACCOUNTS = "Reservoir Station Accounts", __COMPNAME_RESERVOIR_STATION_PRECIP_STATIONS = "Reservoir Station Precipitation Stations", __COMPNAME_RESERVOIR_STATION_EVAP_STATIONS = "Reservoir Station Evaporation Stations", __COMPNAME_RESERVOIR_STATION_CURVE = "Reservoir Station Content/Area/Seepage", __COMPNAME_RESERVOIR_STATION_COLLECTIONS = "Reservoir Station Collection Definitions", __COMPNAME_WELL_STATION_DELAY_TABLES = "Well Station Delay Table Assignment", __COMPNAME_WELL_STATION_DEPLETION_TABLES = "Well Station Depletion Table Assignment", __COMPNAME_WELL_STATION_COLLECTIONS = "Well Station Collection Definitions";
+
+	/// <summary>
+	/// List of all the components, by number (type).
+	/// </summary>
+	private static int[] __component_types = new int[] {COMP_CONTROL_GROUP, COMP_RESPONSE, COMP_CONTROL, COMP_OUTPUT_REQUEST, COMP_REACH_DATA, COMP_CONSUMPTIVE_USE_GROUP, COMP_STATECU_STRUCTURE, COMP_IRRIGATION_PRACTICE_TS_YEARLY, COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY, COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY, COMP_STREAMGAGE_GROUP, COMP_STREAMGAGE_STATIONS, COMP_STREAMGAGE_HISTORICAL_TS_MONTHLY, COMP_STREAMGAGE_HISTORICAL_TS_DAILY, COMP_STREAMGAGE_NATURAL_FLOW_TS_MONTHLY, COMP_STREAMGAGE_NATURAL_FLOW_TS_DAILY, COMP_DELAY_TABLE_MONTHLY_GROUP, COMP_DELAY_TABLES_MONTHLY, COMP_DELAY_TABLE_DAILY_GROUP, COMP_DELAY_TABLES_DAILY, COMP_DIVERSION_GROUP, COMP_DIVERSION_STATIONS, COMP_DIVERSION_RIGHTS, COMP_DIVERSION_TS_MONTHLY, COMP_DIVERSION_TS_DAILY, COMP_DEMAND_TS_MONTHLY, COMP_DEMAND_TS_OVERRIDE_MONTHLY, COMP_DEMAND_TS_AVERAGE_MONTHLY, COMP_DEMAND_TS_DAILY, COMP_PRECIPITATION_GROUP, COMP_PRECIPITATION_TS_MONTHLY, COMP_PRECIPITATION_TS_YEARLY, COMP_EVAPORATION_GROUP, COMP_EVAPORATION_TS_MONTHLY, COMP_EVAPORATION_TS_YEARLY, COMP_RESERVOIR_GROUP, COMP_RESERVOIR_STATIONS, COMP_RESERVOIR_RIGHTS, COMP_RESERVOIR_CONTENT_TS_MONTHLY, COMP_RESERVOIR_CONTENT_TS_DAILY, COMP_RESERVOIR_TARGET_TS_MONTHLY, COMP_RESERVOIR_TARGET_TS_DAILY, COMP_RESERVOIR_RETURN, COMP_INSTREAM_GROUP, COMP_INSTREAM_STATIONS, COMP_INSTREAM_RIGHTS, COMP_INSTREAM_DEMAND_TS_MONTHLY, COMP_INSTREAM_DEMAND_TS_AVERAGE_MONTHLY, COMP_INSTREAM_DEMAND_TS_DAILY, COMP_WELL_GROUP, COMP_WELL_STATIONS, COMP_WELL_RIGHTS, COMP_WELL_PUMPING_TS_MONTHLY, COMP_WELL_PUMPING_TS_DAILY, COMP_WELL_DEMAND_TS_MONTHLY, COMP_WELL_DEMAND_TS_DAILY, COMP_PLAN_GROUP, COMP_PLANS, COMP_PLAN_WELL_AUGMENTATION, COMP_PLAN_RETURN, COMP_STREAMESTIMATE_GROUP, COMP_STREAMESTIMATE_STATIONS, COMP_STREAMESTIMATE_COEFFICIENTS, COMP_STREAMESTIMATE_NATURAL_FLOW_TS_MONTHLY, COMP_STREAMESTIMATE_NATURAL_FLOW_TS_DAILY, COMP_RIVER_NETWORK_GROUP, COMP_RIVER_NETWORK, COMP_NETWORK, COMP_OPERATION_GROUP, COMP_OPERATION_RIGHTS, COMP_DOWNSTREAM_CALL_TS_DAILY, COMP_SANJUAN_RIP, COMP_RIO_GRANDE_SPILL, COMP_GEOVIEW_GROUP, COMP_GEOVIEW};
+
+	/// <summary>
+	/// This array indicates the default file extension to use with each component.
+	/// These extensions can be used in file choosers.
+	/// </summary>
+	private static string[] __component_file_extensions = new string[] {"Control Group", "rsp", "ctl", "out", "rch", "Consumptive Use Group", "str", "ipy", "iwr", "iwd", "Stream Gage Group", "ris", "rih", "riy", "rim", "rid", "Delay Tables (Monthly) Group", "dly", "Delay Tables (Daily) Group", "dld", "Diversion Group", "dds", "ddr", "ddh", "ddy", "ddm", "ddo", "dda", "ddd", "Precipitation Group", "pre", "pra", "Evaporation Group", "evm", "eva", "Reservoir Group", "res", "rer", "eom", "eoy", "tar", "tad", "rrf", "Instream Group", "ifs", "ifr", "ifm", "ifa", "ifd", "Well Group", "wes", "wer", "weh", "wey", "wem", "wed", "Plan Group", "pln", "plw", "prf", "StreamEstimate Group", "ses", "rib", "rim", "rid", "River Network Group", "rin", "net", "Operation Group", "opr", "cal", "sjr", "rgs", "GeoView Group", "gvp"};
+
+	/// <summary>
+	/// This array indicates the StateMod response file property name to use with each
+	/// component.  The group names are suitable for comments (put a # in front when
+	/// writing the response file).  Any value that is a blank string should NOT be written to the StateMod file.
+	/// </summary>
+	private static string[] __statemod_file_properties = new string[] {"", "Response", "Control", "OutputRequest", "Reach_Data", "", "StateCU_Structure", "IrrigationPractice_Yearly", "ConsumptiveWaterRequirement_Monthly", "ConsumptiveWaterRequirement_Daily", "", "StreamGage_Station", "StreamGage_Historic_Monthly", "StreamGage_Historic_Daily", "Stream_Base_Monthly", "Stream_Base_Daily", "", "DelayTable_Monthly", "", "DelayTable_Daily", "", "Diversion_Station", "Diversion_Right", "Diversion_Historic_Monthly", "Diversion_Historic_Daily", "Diversion_Demand_Monthly", "Diversion_DemandOverride_Monthly", "Diversion_Demand_AverageMonthly", "Diversion_Demand_Daily", "", "Precipitation_Monthly", "Precipitation_Annual", "", "Evaporation_Monthly", "Evaporation_Annual", "", "Reservoir_Station", "Reservoir_Right", "Reservoir_Historic_Monthly", "Reservoir_Historic_Daily", "Reservoir_Target_Monthly", "Reservoir_Target_Daily", "Reservoir_Return", "", "Instreamflow_Station", "Instreamflow_Right", "Instreamflow_Demand_Monthly", "Instreamflow_Demand_AverageMonthly", "Instreamflow_Demand_Daily", "", "Well_Station", "Well_Right", "Well_Historic_Monthly", "Well_Historic_Daily", "Well_Demand_Monthly", "Well_Demand_Daily", "", "Plan_Data", "Plan_Wells", "Plan_Return", "", "StreamEstimate_Station", "StreamEstimate_Coefficients", "Stream_Base_Monthly", "Stream_Base_Daily", "", "River_Network", "Network", "", "Operational_Right", "Downstream_Call", "SanJuanRecovery", "RioGrande_Spill_Monthly", "", "GeographicInformation"};
+
+	/// <summary>
+	/// Array indicating which components are groups.
+	/// </summary>
+	private static int[] __component_groups = new int[] {COMP_CONTROL_GROUP, COMP_CONSUMPTIVE_USE_GROUP, COMP_STREAMGAGE_GROUP, COMP_DELAY_TABLE_MONTHLY_GROUP, COMP_DELAY_TABLE_DAILY_GROUP, COMP_DIVERSION_GROUP, COMP_PRECIPITATION_GROUP, COMP_EVAPORATION_GROUP, COMP_RESERVOIR_GROUP, COMP_INSTREAM_GROUP, COMP_WELL_GROUP, COMP_PLAN_GROUP, COMP_STREAMESTIMATE_GROUP, COMP_RIVER_NETWORK_GROUP, COMP_OPERATION_GROUP, COMP_GEOVIEW_GROUP};
+
+	/// <summary>
+	/// Array indicating the primary components within each component group.  The
+	/// primary components are used to get the list of identifiers for displays and
+	/// processing.  The number of values should agree with the list above.
+	/// </summary>
+	private static int[] __component_group_primaries = new int[] {COMP_RESPONSE, COMP_STATECU_STRUCTURE, COMP_STREAMGAGE_STATIONS, COMP_DELAY_TABLES_MONTHLY, COMP_DELAY_TABLES_DAILY, COMP_DIVERSION_STATIONS, COMP_PRECIPITATION_TS_MONTHLY, COMP_EVAPORATION_TS_MONTHLY, COMP_RESERVOIR_STATIONS, COMP_INSTREAM_STATIONS, COMP_WELL_STATIONS, COMP_PLANS, COMP_STREAMESTIMATE_STATIONS, COMP_RIVER_NETWORK, COMP_OPERATION_RIGHTS, COMP_GEOVIEW};
+
+	/// <summary>
+	/// Array indicating the groups for each component.
+	/// </summary>
+	private static int[] __component_group_assignments = new int[] {COMP_CONTROL_GROUP, COMP_CONTROL_GROUP, COMP_CONTROL_GROUP, COMP_CONTROL_GROUP, COMP_CONTROL_GROUP, COMP_CONSUMPTIVE_USE_GROUP, COMP_CONSUMPTIVE_USE_GROUP, COMP_CONSUMPTIVE_USE_GROUP, COMP_CONSUMPTIVE_USE_GROUP, COMP_CONSUMPTIVE_USE_GROUP, COMP_STREAMGAGE_GROUP, COMP_STREAMGAGE_GROUP, COMP_STREAMGAGE_GROUP, COMP_STREAMGAGE_GROUP, COMP_STREAMGAGE_GROUP, COMP_STREAMGAGE_GROUP, COMP_DELAY_TABLE_MONTHLY_GROUP, COMP_DELAY_TABLE_MONTHLY_GROUP, COMP_DELAY_TABLE_DAILY_GROUP, COMP_DELAY_TABLE_DAILY_GROUP, COMP_DIVERSION_GROUP, COMP_DIVERSION_GROUP, COMP_DIVERSION_GROUP, COMP_DIVERSION_GROUP, COMP_DIVERSION_GROUP, COMP_DIVERSION_GROUP, COMP_DIVERSION_GROUP, COMP_DIVERSION_GROUP, COMP_DIVERSION_GROUP, COMP_PRECIPITATION_GROUP, COMP_PRECIPITATION_GROUP, COMP_PRECIPITATION_GROUP, COMP_EVAPORATION_GROUP, COMP_EVAPORATION_GROUP, COMP_EVAPORATION_GROUP, COMP_RESERVOIR_GROUP, COMP_RESERVOIR_GROUP, COMP_RESERVOIR_GROUP, COMP_RESERVOIR_GROUP, COMP_RESERVOIR_GROUP, COMP_RESERVOIR_GROUP, COMP_RESERVOIR_GROUP, COMP_RESERVOIR_GROUP, COMP_INSTREAM_GROUP, COMP_INSTREAM_GROUP, COMP_INSTREAM_GROUP, COMP_INSTREAM_GROUP, COMP_INSTREAM_GROUP, COMP_INSTREAM_GROUP, COMP_WELL_GROUP, COMP_WELL_GROUP, COMP_WELL_GROUP, COMP_WELL_GROUP, COMP_WELL_GROUP, COMP_WELL_GROUP, COMP_WELL_GROUP, COMP_PLAN_GROUP, COMP_PLAN_GROUP, COMP_PLAN_GROUP, COMP_PLAN_GROUP, COMP_STREAMESTIMATE_GROUP, COMP_STREAMESTIMATE_GROUP, COMP_STREAMESTIMATE_GROUP, COMP_STREAMESTIMATE_GROUP, COMP_STREAMESTIMATE_GROUP, COMP_RIVER_NETWORK_GROUP, COMP_RIVER_NETWORK_GROUP, COMP_RIVER_NETWORK_GROUP, COMP_OPERATION_GROUP, COMP_OPERATION_GROUP, COMP_OPERATION_GROUP, COMP_OPERATION_GROUP, COMP_OPERATION_GROUP, COMP_GEOVIEW_GROUP, COMP_GEOVIEW_GROUP};
+
+	/// <summary>
+	/// The following array assigns the time series data types for use with time series.
+	/// For example, StateMod data sets do not contain a data type and therefore after
+	/// reading the file, the time series data type must be assumed.  If the data
+	/// component is known (e.g., because reading from a response file), then the
+	/// following array can be used to look up the data type for the time series.
+	/// Components that are not time series have blank strings for data types.
+	/// </summary>
+	private static string[] __component_ts_data_types = new string[] {"", "", "", "", "", "", "", "", "CWR", "CWR", "", "", "FlowHist", "FlowHist", "FlowNatural", "FlowNatural", "", "", "", "", "", "", "TotalWaterRights", "DiversionHist", "DiversionHist", "Demand", "DemandOverride", "DemandAverage", "Demand", "", "Precipitation", "Precipitation", "", "Evaporation", "Evaporation", "", "", "TotalWaterRights", "ContentEOMHist", "ContentEODHist", "Target", "Target", "", "", "", "TotalWaterRights", "Demand", "DemandAverage", "Demand", "", "", "TotalWaterRights", "PumpingHist", "PumpingHist", "Demand", "Demand", "", "", "", "", "", "", "", "FlowNatural", "FlowNatural", "", "", "", "", "", "Call", "SJRIP", "RioGrandeSpill", "", ""};
+
+	/// <summary>
+	/// The following array assigns the time series data intervals for use with time
+	/// series.  This information is important because the data types themselves may
+	/// not be unique and the interval must be examined.
+	/// </summary>
+	private static int[] __component_ts_data_intervals = new int[] {TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.YEAR, TimeInterval.MONTH, TimeInterval.DAY, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.MONTH, TimeInterval.DAY, TimeInterval.MONTH, TimeInterval.DAY, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.MONTH, TimeInterval.DAY, TimeInterval.MONTH, TimeInterval.MONTH, TimeInterval.MONTH, TimeInterval.DAY, TimeInterval.UNKNOWN, TimeInterval.MONTH, TimeInterval.YEAR, TimeInterval.UNKNOWN, TimeInterval.MONTH, TimeInterval.YEAR, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.MONTH, TimeInterval.DAY, TimeInterval.MONTH, TimeInterval.DAY, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.MONTH, TimeInterval.MONTH, TimeInterval.DAY, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.MONTH, TimeInterval.DAY, TimeInterval.MONTH, TimeInterval.DAY, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.MONTH, TimeInterval.DAY, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN, TimeInterval.DAY, TimeInterval.YEAR, TimeInterval.MONTH, TimeInterval.UNKNOWN, TimeInterval.UNKNOWN};
+
+	/// <summary>
+	/// The following array assigns the time series data units for use with time series.
+	/// These can be used when creating new time series.  If the data
+	/// component is known (e.g., because reading from a response file), then the
+	/// following array can be used to look up the data units for the time series.
+	/// Components that are not time series have blank strings for data units.
+	/// </summary>
+	private static string[] __component_ts_data_units = new string[] {"", "", "", "", "", "", "", "", "ACFT", "CFS", "", "", "ACFT", "CFS", "ACFT", "CFS", "", "", "", "", "", "", "CFS", "ACFT", "CFS", "ACFT", "ACFT", "ACFT", "CFS", "", "IN", "IN", "", "IN", "IN", "", "", "ACFT", "ACFT", "ACFT", "ACFT", "ACFT", "", "", "", "CFS", "CFS", "CFS", "CFS", "", "", "CFS", "ACFT", "CFS", "ACFT", "CFS", "", "", "", "", "", "", "", "ACFT", "CFS", "", "", "", "", "", "DAY", "", "", "", ""};
+
+	/// <summary>
+	/// List of unknown file property names in the *.rsp.  These are properties not understood
+	/// by the code but will need to be retained when writing the *.rsp to keep it whole.
+	/// This list WILL include special properties like StateModExecutable that are used by the GUI.
+	/// </summary>
+	private PropList __unhandledResponseFileProperties = new PropList("Unhandled response file properties.");
+
+	// Control file data specific to StateMod.  Defaults are assigned to allow
+	// backward compatibility with old data sets - newer settings are set to
+	// "no data" values.  Note that after reading the control file, setDirty(false)
+	// is called and the new defaults may be ignored if the file is not written.
+
+	/// <summary>
+	/// Heading for output.
+	/// </summary>
+	private string __heading1 = "";
+	/// <summary>
+	/// Heading for output.
+	/// </summary>
+	private string __heading2 = "";
+	/// <summary>
+	/// Starting year of the simulation.  Must be defined.
+	/// </summary>
+	private int __iystr = StateMod_Util.MISSING_INT;
+	/// <summary>
+	/// Ending year of the simulation.  Must be defined.
+	/// </summary>
+	private int __iyend = StateMod_Util.MISSING_INT;
+	/// <summary>
+	/// Switch for output units.  Default is ACFT.
+	/// </summary>
+	private int __iresop = 2;
+	/// <summary>
+	/// Monthly or avg monthly evap.  Default to monthly.
+	/// </summary>
+	private int __moneva = 0;
+	/// <summary>
+	/// Total or gains streamflow.  Default to total.
+	/// </summary>
+	private int __iopflo = 1;
+	/// <summary>
+	/// Number of precipitation stations - should be set when the time series are read -
+	/// this will be phased out in the future.
+	/// </summary>
+	private int __numpre = 0;
+	/// <summary>
+	/// Number of evaporation stations - should be set when the time series are read -
+	/// this will be phased out in the future.
+	/// </summary>
+	private int __numeva = 0;
+	/// <summary>
+	/// Max number entries in delay pattern.  Default is variable number as percents.
+	/// The following defaults assume normal operation...
+	/// </summary>
+	private int __interv = -1;
+	/// <summary>
+	/// Factor, CFS to AF/D
+	/// </summary>
+	private double __factor = 1.9835;
+	/// <summary>
+	/// Divisor for streamflow data units.
+	/// </summary>
+	private double __rfacto = 1.9835;
+	/// <summary>
+	/// Divisor for diversion data units.
+	/// </summary>
+	private double __dfacto = 1.9835;
+	/// <summary>
+	/// Divisor for instream flow data units.
+	/// </summary>
+	private double __ffacto = 1.9835;
+	/// <summary>
+	/// Factor, reservoir content data to AF.
+	/// </summary>
+	private double __cfacto = 1.0;
+	/// <summary>
+	/// Factor, evaporation data to FT.
+	/// </summary>
+	private double __efacto = 1.0;
+	/// <summary>
+	/// Factor, precipitation data to FT.
+	/// </summary>
+	private double __pfacto = 1.0;
+	/// <summary>
+	/// Calendar/water/irrigation year - default to calendar.
+	/// </summary>
+	private YearType __cyrl = YearType.CALENDAR;
+	/// <summary>
+	/// Switch for demand type.  Default to historic approach.
+	/// </summary>
+	private int __icondem = 1;
+	/// <summary>
+	/// Switch for detailed output.  Default is no detailed output.
+	/// </summary>
+	private int __ichk = 0;
+	/// <summary>
+	/// Switch for re-operation control.  Default is yes re-operate.
+	/// Unlike most StateMod options this uses 0 for do it.
+	/// </summary>
+	private int __ireopx = 0;
+	/// <summary>
+	/// Switch for instream flow approach.  Default to use reaches and average monthly demands.
+	/// </summary>
+	private int __ireach = 1;
+	/// <summary>
+	/// Switch for detailed call data.  Default to no data.
+	/// </summary>
+	private int __icall = 0;
+	/// <summary>
+	/// Default to not used.  Detailed call water right ID.
+	/// </summary>
+	private string __ccall = "";
+	/// <summary>
+	/// Switch for daily analysis.  Default to no daily analysis.
+	/// </summary>
+	private int __iday = 0;
+	/// <summary>
+	/// Switch for well analysis.  Default to no well analysis.
+	/// </summary>
+	private int __iwell = 0;
+	/// <summary>
+	/// Maximum recharge limit.  Default to not used.
+	/// </summary>
+	private double __gwmaxrc = 0.0;
+	/// <summary>
+	/// San Juan recovery program.  Default to no SJRIP.
+	/// </summary>
+	private int __isjrip = 0;
+	/// <summary>
+	/// Is IPY data used?  Default to no data.
+	/// </summary>
+	private int __itsfile = 0;
+	/// <summary>
+	/// IWR switch - default to no data.
+	/// </summary>
+	private int __ieffmax = 0;
+	/// <summary>
+	/// Sprinkler switch.  Default to no sprinkler data.
+	/// </summary>
+	private int __isprink = 0;
+	/// <summary>
+	/// Soil moisture accounting.  Default to not used.
+	/// </summary>
+	private double __soild = 0.0;
+	/// <summary>
+	/// Significant figures for output.
+	/// </summary>
+	private int __isig = 0;
+
+	/// <summary>
+	/// Constructor.  Makes a blank data set.  It is expected that other information 
+	/// will be set during further processing.
+	/// </summary>
+	public StateMod_DataSet() : base(__component_types, __component_names, __component_groups, __component_group_assignments, __component_group_primaries)
+	{
+
+		initialize();
+	}
+	/// <summary>
+	/// Constructor.  Makes a blank data set.  Specific output files, by default, will 
+	/// use the output directory and base file name in output file names. </summary>
+	/// <param name="type"> Data set type (currently ignored). </param>
+	public StateMod_DataSet(int type) : base(__component_types, __component_names, __component_groups, __component_group_assignments, __component_group_primaries)
+	{
+		try
+		{
+			setDataSetType(type, true);
+		}
+		catch (Exception)
+		{
+			// Type not important
+		}
+
+		initialize();
+	}
+
+	/// <summary>
+	/// Copy constructor. </summary>
+	/// <param name="dataset"> Original data set to copy. </param>
+	/// <param name="deep_copy"> If true, all data are copied (currently not recognized).
+	/// If false, the data set components are copied but not the data itself.  This is
+	/// typically used to save the names of components before editing in the response file editor. </param>
+	public StateMod_DataSet(StateMod_DataSet dataset, bool deep_copy) : this() // To initialize a new instance.  Next - clear out all
+	{
+				// the components.  Otherwise they are added again!
+		string routine = "StateMod_DataSet";
+		getComponents().clear();
+		setDataSetDirectory(dataset.getDataSetDirectory());
+		// Internal data...
+		__readTimeSeries = dataset.__readTimeSeries;
+		// Control settings...
+		__heading1 = dataset.__heading1;
+		__heading2 = dataset.__heading2;
+		__iystr = dataset.__iystr;
+		__iyend = dataset.__iyend;
+		__iresop = dataset.__iresop;
+		__moneva = dataset.__moneva;
+		__iopflo = dataset.__iopflo;
+		__numpre = dataset.__numpre;
+		__numeva = dataset.__numeva;
+		__interv = dataset.__interv;
+		__factor = dataset.__factor;
+		__rfacto = dataset.__rfacto;
+		__dfacto = dataset.__dfacto;
+		__ffacto = dataset.__ffacto;
+		__cfacto = dataset.__cfacto;
+		__efacto = dataset.__efacto;
+		__pfacto = dataset.__pfacto;
+		__cyrl = dataset.__cyrl;
+		__icondem = dataset.__icondem;
+		__ichk = dataset.__ichk;
+		__ireopx = dataset.__ireopx;
+		__ireach = dataset.__ireach;
+		__icall = dataset.__icall;
+		__ccall = dataset.__ccall;
+		__iday = dataset.__iday;
+		__iwell = dataset.__iwell;
+		__gwmaxrc = dataset.__gwmaxrc;
+		__isjrip = dataset.__isjrip;
+		__itsfile = dataset.__itsfile;
+		__ieffmax = dataset.__ieffmax;
+		__isprink = dataset.__isprink;
+		__soild = dataset.__soild;
+		__isig = dataset.__isig;
+
+		// Add each component, doing a shallow copy...
+
+		IList<DataSetComponent> data_Vector = dataset.getComponents();
+		int size = 0;
+		if (data_Vector != null)
+		{
+			size = data_Vector.Count;
+		}
+		DataSetComponent comp, comp2, newcomp = null, newcomp2;
+		for (int i = 0; i < size; i++)
+		{
+			comp = data_Vector[i];
+			if (comp == null)
+			{
+				addComponent(null);
+			}
+			else
+			{
+				try
+				{
+					newcomp = new DataSetComponent(comp, this, false);
+					addComponent(newcomp);
+				}
+				catch (Exception e)
+				{
+					addComponent(null);
+					Message.printWarning(2, routine, "Error copying component.");
+					Message.printWarning(2, routine, e);
+					continue;
+				}
+				if (comp.isGroup())
+				{
+					// Need to add components to the group...
+					System.Collections.IList data2 = (System.Collections.IList)comp.getData();
+					int size2 = 0;
+					if (data2 != null)
+					{
+						size2 = data2.Count;
+					}
+					for (int j = 0; j < size2; j++)
+					{
+						comp2 = (DataSetComponent) data2[j];
+						try
+						{
+							newcomp2 = new DataSetComponent(comp2, this, false);
+							// Need to manually set...
+							newcomp2.setParent(newcomp);
+							newcomp.addComponent(newcomp2);
+						}
+						catch (Exception e)
+						{
+							Message.printWarning(3, routine, "Error copying component.");
+							Message.printWarning(3, routine, e);
+						}
+					}
+				}
+			}
+		}
+		setDataSetDirectory(dataset.getDataSetDirectory());
+	}
+
+	/// <summary>
+	/// Indicate whether time series where read with the data set. </summary>
+	/// <returns> true if all time series were read. </returns>
+	public virtual bool areTSRead()
+	{
+		return __readTimeSeries;
+	}
+
+	/// <summary>
+	/// Check a component's data, using other available components as appropriate. </summary>
+	/// <param name="comp_type"> the component type. </param>
+	/// <param name="props"> Properties to control the check (currently unused).  This may
+	/// be used to control whether results are returned, and in what format. </param>
+	/// <returns> the Vector of check results messages. </returns>
+	public virtual IList<string> checkComponentData(int comp_type, PropList props)
+	{
+		if (comp_type == COMP_WELL_STATIONS)
+		{
+			return checkComponentData_WellStations(props);
+		}
+		else if (comp_type == COMP_WELL_RIGHTS)
+		{
+			return checkComponentData_WellRights(props);
+		}
+		return new List<object>();
+	}
+
+	/// <summary>
+	/// FIXME SAM 2009-06-30 Move to well right class.
+	/// Helper method to check well rights component data.  The following are checked:
+	/// <ol>
+	/// <li>	Well stations without at least one right are listed.  This requires that
+	/// the dataset include well stations.</li>
+	/// <li>	Well rights with yield <= 0.0</li>
+	/// <li>	Well rights summary for a station is not equal to the well capacity.
+	/// This requires that the dataset include well stations.<li>
+	/// </ol>
+	/// </summary>
+	private IList<string> checkComponentData_WellRights(PropList props)
+	{
+		IList<string> message_list = new List<object>();
+
+		// Make sure that there is at least one well right for each well station...
+
+		DataSetComponent wes_comp = getComponentForComponentType(COMP_WELL_STATIONS);
+		DataSetComponent wer_comp = getComponentForComponentType(COMP_WELL_RIGHTS);
+		System.Collections.IList wes_Vector = (System.Collections.IList)wes_comp.getData();
+		System.Collections.IList wer_Vector = (System.Collections.IList)wer_comp.getData();
+		int size = 0;
+		if (wes_Vector != null)
+		{
+			size = wes_Vector.Count;
+		}
+		StateMod_Well wes_i = null;
+		StateMod_Parcel parcel = null; // Parcel associated with a well station
+		int wes_parcel_count = 0; // Parcel count for well station
+		double wes_parcel_area = 0.0; // Area of parcels for well station
+		int wes_well_parcel_count = 0; // Parcel (with wells) count for well station.
+		double wes_well_parcel_area = 0.0;
+						// Area of parcels with wells for well station.
+		System.Collections.IList parcel_Vector; // List of parcels for well station.
+		int count = 0; // Count of well stations with potential problems.
+		string id_i = null;
+		System.Collections.IList rights = null;
+		for (int i = 0; i < size; i++)
+		{
+			wes_i = (StateMod_Well)wes_Vector[i];
+			if (wes_i == null)
+			{
+				continue;
+			}
+			id_i = wes_i.getID();
+			rights = StateMod_Util.getRightsForStation(id_i, wer_Vector);
+			// TODO SAM 2007-01-02 Evaluate how to put this code in a separate method and share between rights and stations.
+			if ((rights == null) || (rights.Count == 0))
+			{
+				// The following is essentially a copy of code for well
+				// stations. Keep the code consistent.  Note that the
+				// following assumes that when reading well rights from
+				// HydroBase that lists of parcels are saved with well
+				// stations.  This will clobber any parcel data that
+				// may have been saved at the time that well stations
+				// were processed (if processed in the same commands file).
+				++count;
+				// Check for parcels...
+				wes_parcel_count = 0;
+				wes_parcel_area = 0.0;
+				wes_well_parcel_count = 0;
+				wes_well_parcel_area = 0.0;
+				parcel_Vector = wes_i.getParcels();
+				if (parcel_Vector != null)
+				{
+					wes_parcel_count = parcel_Vector.Count;
+					for (int j = 0; j < wes_parcel_count; j++)
+					{
+						parcel = (StateMod_Parcel)parcel_Vector[j];
+						if (parcel.getArea() > 0.0)
+						{
+							wes_parcel_area += parcel.getArea();
+						}
+						if (parcel.getWellCount() > 0)
+						{
+							wes_well_parcel_count += parcel.getWellCount();
+							wes_well_parcel_area += parcel.getArea();
+						}
+					}
+				}
+				// Format suitable for output in a list that can be copied to a spreadsheet or table.
+				message_list.Add(StringUtil.formatString(count,"%4d") + ", " + StringUtil.formatString(id_i,"%-12.12s") + ", " + StringUtil.formatString(wes_i.getCollectionType(),"%-10.10s") + ", " + StringUtil.formatString(wes_parcel_count,"%9d") + ", " + StringUtil.formatString(wes_parcel_area,"%11.0f") + ", " + StringUtil.formatString(wes_well_parcel_count,"%9d") + ", " + StringUtil.formatString(wes_well_parcel_area,"%11.0f") + ", \"" + wes_i.getName() + "\"");
+			}
+		}
+		if (message_list.Count > 0)
+		{
+			int line = 0; // Line number for output (zero index).
+			// Prepend introduction to the specific warnings...
+			message_list.Insert(line++, "");
+			message_list.Insert(line++, "The following well stations (" + count + " out of " + size + ") have no water rights (no irrigated parcels served by wells).");
+			message_list.Insert(line++, "Data may be OK if the station has no wells.");
+			message_list.Insert(line++, "");
+			message_list.Insert(line++, "Parcel count and area in the following table are available " + "only if well rights are read from HydroBase.");
+			message_list.Insert(line++, "");
+			message_list.Insert(line++, "    ,             ,           , # PARCELS, TOTAL      , # PARCELS, PARCELS    , WELL");
+			message_list.Insert(line++, "    , WELL        , COLLECTION, FOR WELL , PARCEL     , WITH     , WITH WELLS , STATION");
+			message_list.Insert(line++, "NUM., STATION ID  , TYPE      , STATION  , AREA (ACRE), WELLS    , AREA (ACRE), NAME");
+			message_list.Insert(line++, "----,-------------,-----------,----------,------------,----------,------------,-------------------------");
+		}
+
+		// Check to make sure the sum of well rights equals the well station capacity...
+
+		checkComponentData_WellRights_Capacity(message_list);
+
+		// Since well rights are determined from parcel data, print a list of
+		// well rights that do not have associated yield (decree)...
+
+		size = 0;
+		if (wer_Vector != null)
+		{
+			size = wer_Vector.Count;
+		}
+		int pos = 0; // Position in well station vector
+		string wes_name = null; // Well station name
+		string wes_id = null; // Well station ID
+		System.Collections.IList message_list2 = new List<object>();
+		string wer_id = null; // Well right identifier
+		count = 0;
+		double decree = 0.0;
+		StateMod_WellRight wer_i = null;
+		for (int i = 0; i < size; i++)
+		{
+			wer_i = (StateMod_WellRight)wer_Vector[i];
+			wer_id = wer_i.getID();
+			// Format to two digits to match StateMod output...
+			decree = StringUtil.atod(StringUtil.formatString(wer_i.getDcrdivw(),"%.2f"));
+			if (decree <= 0.0)
+			{
+				// Find associated well station for output to print ID and name...
+				++count;
+				pos = StateMod_Util.IndexOf(wes_Vector, wer_i.getCgoto());
+				wes_i = null;
+				if (pos >= 0)
+				{
+					wes_i = (StateMod_Well)wes_Vector[pos];
+				}
+				wes_name = "";
+				if (wes_i != null)
+				{
+					wes_id = wes_i.getID();
+					wes_name = wes_i.getName();
+				}
+				// Format suitable for output in a list that can be copied to a spreadsheet or table.
+				message_list2.Add(StringUtil.formatString(count,"%4d") + ", " + StringUtil.formatString(wer_id,"%-12.12s") + ", " + StringUtil.formatString(wes_id,"%-12.12s") + ", \"" + wes_name + "\"");
+			}
+		}
+		if (message_list2.Count > 0)
+		{
+			// Prepend introduction to the specific warnings...
+			message_list2.Insert(0, "");
+			message_list2.Insert(1, "The following well rights (" + count + " out of " + size + ") have no decree (checked to StateMod file .XX precision).");
+			message_list2.Insert(2, "Well yield data may not be available.");
+			message_list2.Insert(3, "");
+			message_list2.Insert(4, "    , WELL        , WELL        ,");
+			message_list2.Insert(5, "NUM., RIGHT ID    , STATION ID  , WELL NAME");
+			message_list2.Insert(6, "----,-------------,-------------,------------------------");
+
+			StringUtil.addListToStringList(message_list, message_list2);
+		}
+
+		// Save the messages in case something needs to extract later...
+		wer_comp.setDataCheckResults(message_list);
+		return message_list;
+	}
+
+	/// <summary>
+	/// Helper method to check that well rights sum to the well station capacity.  This
+	/// is called by the well right and well station checks.  The check is performed
+	/// by formatting the capacity and decree sum to .NN precision. </summary>
+	/// <param name="message_list"> Vector of string to be printed to the check file, which will
+	/// be added to in this method. </param>
+	internal virtual void checkComponentData_WellRights_Capacity(System.Collections.IList message_list)
+	{
+		System.Collections.IList message_list2 = new List<object>(); // New messages generated by this method.
+		DataSetComponent wes_comp = getComponentForComponentType(COMP_WELL_STATIONS);
+		DataSetComponent wer_comp = getComponentForComponentType(COMP_WELL_RIGHTS);
+		System.Collections.IList wes_Vector = (System.Collections.IList)wes_comp.getData();
+		System.Collections.IList wer_Vector = (System.Collections.IList)wer_comp.getData();
+		StateMod_WellRight wer_i = null;
+		StateMod_Well wes_i = null;
+		int size = 0;
+		if (wes_Vector != null)
+		{
+			size = wes_Vector.Count;
+		}
+		double decree;
+		double decree_sum;
+		int count = 0;
+		int onoff = 0; // On/off switch for right
+		int size_rights = 0;
+		string id_i = null;
+		System.Collections.IList rights = null;
+		for (int i = 0; i < size; i++)
+		{
+			wes_i = (StateMod_Well)wes_Vector[i];
+			if (wes_i == null)
+			{
+				continue;
+			}
+			id_i = wes_i.getID();
+			rights = StateMod_Util.getRightsForStation(id_i, wer_Vector);
+			size_rights = 0;
+			if (rights != null)
+			{
+				size_rights = rights.Count;
+			}
+			if (size_rights == 0)
+			{
+				continue;
+			}
+			// Get the sum of the rights, assuming that all should be
+			// compared against the capacity (i.e., sum of rights at the
+			// end of the period will be compared with the current well capacity)...
+			decree_sum = 0.0;
+			for (int iright = 0; iright < size_rights; iright++)
+			{
+				wer_i = (StateMod_WellRight)rights[iright];
+				decree = wer_i.getDcrdivw();
+				onoff = wer_i.getSwitch();
+				if (decree < 0.0)
+				{
+					// Ignore - missing values will cause a bad sum.
+					continue;
+				}
+				if (onoff <= 0)
+				{
+					// Subtract the decree...
+					decree_sum -= decree;
+				}
+				else
+				{
+					// Add the decree...
+					decree_sum += decree;
+				}
+			}
+			// Compare to a whole number, which is the greatest precision for documented files.
+			if (!StringUtil.formatString(decree_sum,"%.2f").Equals(StringUtil.formatString(wes_i.getDivcapw(),"%.2f")))
+			{
+				// Format suitable for output in a list that can be copied to a spreadsheet or table.
+				message_list2.Add(StringUtil.formatString(++count,"%4d") + ", " + StringUtil.formatString(id_i,"%-12.12s") + ", " + StringUtil.formatString(wes_i.getCollectionType(),"%-10.10s") + "," + StringUtil.formatString(wes_i.getDivcapw(),"%9.2f") + "," + StringUtil.formatString(decree_sum,"%9.2f") + "," + StringUtil.formatString(size_rights,"%8d") + ", \"" + wes_i.getName() + "\"");
+			}
+		}
+		if (message_list2.Count > 0)
+		{
+			// Prepend introduction to the specific warnings...
+			int line = 0;
+			message_list2.Insert(line++, "");
+			message_list2.Insert(line++, "The following well stations (" + count + " out of " + size + ") have capacity different from the sum of well rights for the station.");
+			message_list2.Insert(line++, "Check that the StateDMI command parameters used to process " + "well stations and rights are consistent.");
+			message_list2.Insert(line++, "");
+			message_list2.Insert(line++, "Parcel count and area in the following table are available " + "only if well rights are read from HydroBase.");
+			message_list2.Insert(line++, "");
+			message_list2.Insert(line++,"    ,             ,           , WELL    , SUM OF  , NUMBER , WELL");
+			message_list2.Insert(line++,"    , WELL        , COLLECTION, CAPACITY, RIGHTS  , OF     , STATION");
+			message_list2.Insert(line++,"NUM., STATION ID  , TYPE      , (CFS)   , (CFS)   , RIGHTS , NAME");
+			message_list2.Insert(line++, "----,-------------,-----------,---------,---------,--------,-------------------------");
+			// Add to the main message list...
+			StringUtil.addListToStringList(message_list, message_list2);
+		}
+	}
+
+	/// <summary>
+	/// Helper method to check well stations component data.  The following are checked:
+	/// <ol>
+	/// <li>	Well stations with acreage <= 0.0.</li>
+	/// <li>	The well capacity is equal to the sum of the well rights (this requires
+	/// that well rights are also available in memory).
+	/// </ol>
+	/// </summary>
+	private System.Collections.IList checkComponentData_WellStations(PropList props)
+	{
+		System.Collections.IList message_list = new List<object>();
+
+		DataSetComponent wes_comp = getComponentForComponentType(COMP_WELL_STATIONS);
+		System.Collections.IList wes_Vector = (System.Collections.IList)wes_comp.getData();
+		int size = 0;
+		if (wes_Vector != null)
+		{
+			size = wes_Vector.Count;
+		}
+		StateMod_Well wes_i = null;
+		StateMod_Parcel parcel = null; // Parcel associated with a well station
+		string id_i = null;
+
+		// Generate a list of well stations that do not have associated acreage or parcels...
+
+		int wes_parcel_count = 0; // Parcel count for well station
+		double wes_parcel_area = 0.0; // Area of parcels for well station
+		int wes_well_parcel_count = 0; // Parcel (with wells) count for well station.
+		double wes_well_parcel_area = 0.0; // Area of parcels with wells for well station.
+		System.Collections.IList parcel_Vector; // List of parcels for well station.
+		int count = 0; // Count of well stations with potential problems.
+		for (int i = 0; i < size; i++)
+		{
+			wes_i = (StateMod_Well)wes_Vector[i];
+			id_i = wes_i.getID();
+			if (wes_i.getAreaw() <= 0.0)
+			{
+				++count;
+				// Check for parcels...
+				wes_parcel_count = 0;
+				wes_parcel_area = 0.0;
+				wes_well_parcel_count = 0;
+				wes_well_parcel_area = 0.0;
+				parcel_Vector = wes_i.getParcels();
+				if (parcel_Vector != null)
+				{
+					wes_parcel_count = parcel_Vector.Count;
+					for (int j = 0; j < wes_parcel_count; j++)
+					{
+						parcel = (StateMod_Parcel) parcel_Vector[j];
+						if (parcel.getArea() > 0.0)
+						{
+							wes_parcel_area += parcel.getArea();
+						}
+						if (parcel.getWellCount() > 0)
+						{
+							wes_well_parcel_count += parcel.getWellCount();
+							wes_well_parcel_area += parcel.getArea();
+						}
+					}
+				}
+				// Format suitable for output in a list that
+				// can be copied to a spreadsheet or table.
+				message_list.Add(StringUtil.formatString(count,"%4d") + ", " + StringUtil.formatString(id_i,"%-12.12s") + ", " + StringUtil.formatString(wes_i.getCollectionType(),"%-10.10s") + ", " + StringUtil.formatString(wes_parcel_count,"%9d") + ", " + StringUtil.formatString(wes_parcel_area,"%11.0f") + ", " + StringUtil.formatString(wes_well_parcel_count,"%9d") + ", " + StringUtil.formatString(wes_well_parcel_area,"%11.0f") + ", \"" + wes_i.getName() + "\"");
+			}
+		}
+		if (message_list.Count > 0)
+		{
+			// Prepend introduction to the specific warnings...
+			message_list.Insert(0, "");
+			message_list.Insert(1, "The following well stations (" + count + " out of " + size + ") have no irrigated parcels served by wells.");
+			message_list.Insert(2, "Data may be OK if the station is an M&I or has no wells.");
+			message_list.Insert(3, "");
+			message_list.Insert(4, "Parcel count and area in the following table are available " + "only if well stations are read from HydroBase.");
+			message_list.Insert(5, "");
+			message_list.Insert(6, "    ,             ,           , # PARCELS, TOTAL      , # PARCELS, PARCELS    , WELL");
+			message_list.Insert(7, "    , WELL        , COLLECTION, FOR WELL , PARCEL     , WITH     , WITH WELLS , STATION");
+			message_list.Insert(8, "NUM., STATION ID  , TYPE      , STATION  , AREA (ACRE), WELLS    , AREA (ACRE), NAME");
+			message_list.Insert(9, "----,-------------,-----------,----------,------------,----------,------------,-------------------------");
+		}
+
+		// Check to make sure the sum of well rights equals the well station
+		// capacity...
+
+		checkComponentData_WellRights_Capacity(message_list);
+
+		// Save the messages in case something needs to extract later...
+		wes_comp.setDataCheckResults(message_list);
+		return message_list;
+	}
+
+	/// <summary>
+	/// Check all file names for compliance with the 8.3 naming convention.  This is
+	/// currently a limitation in StateMod.  It appears that StateMod will run even if
+	/// a directory name has a full 8.3 part.  So, break all the response file path
+	/// parts for every file into tokens based on the path separator and check for:
+	/// <ol>
+	/// <li>	Overall length of part must be less than 13.</li>
+	/// <li>	Length without . is <= 8.</li>
+	/// <li>	Only one period can exist and it must be within the last 4 characters.</li>
+	/// </ol> </summary>
+	/// <returns> true if the filenames pass inspection, false if any do not. </returns>
+	/// <param name="warning_level"> If 1, then a warning dialog will be shown. Otherwise,
+	/// messages will be printed to the log file only, depending on the global warning level. </param>
+	public virtual bool checkComponentFilenames(IList<string> file_names, int warning_level)
+	{ // For now check each part of all, even though the path is reused...
+		IList<string> parts = null;
+		string fullname = null;
+		StringBuilder warnings = new StringBuilder();
+		string part = null;
+		int j = 0;
+		int size = 0;
+		int count = 0;
+		int nfiles = 0;
+		if (file_names != null)
+		{
+			nfiles = file_names.Count;
+		}
+		string file_name;
+		for (int i = 0; i < nfiles; i++)
+		{
+			// Some ugly checks because at this point we are not being
+			// really careful about knowing the positions of specific files
+			// in the list.  When Ray Bennett starts using a PropList it should be a lot easier...
+			file_name = file_names[i];
+			//if ( == StateMod_DataSet.COMP_GEOVIEW) {}
+			if (StringUtil.endsWithIgnoreCase(file_name,".gvp") || StringUtil.endsWithIgnoreCase(file_name,".net"))
+			{
+				// No need to check the GIS project file or network
+				// file because the model does not even use these files...
+				continue;
+			}
+
+			// Get the full file name, relative to the data set directory...
+			fullname = getDataFilePathAbsolute(file_name);
+			// Break into parts...
+			parts = StringUtil.breakStringList(fullname, File.separator, 0);
+			size = 0;
+
+			if (parts != null)
+			{
+				size = parts.Count;
+			}
+
+			for (j = 0; j < size; j++)
+			{
+				part = parts[j];
+				if (string.ReferenceEquals(part, null))
+				{
+					continue;
+				}
+				if ((part.Length > 12) || ((part.IndexOf(".", StringComparison.Ordinal) < 0) && (part.Length> 8)) || ((part.Length <= 12) && (part.IndexOf(".", StringComparison.Ordinal) >= 0) && (part.IndexOf(".", StringComparison.Ordinal) < (part.Length - 4))) || (StringUtil.patternCount(part,".") > 1))
+				{
+					if (count == 0)
+					{
+						warnings.Append("\nThe following files do not adhere to the 8.3 file standard required by StateMod:\n");
+					}
+					warnings.Append("File \"" + fullname + "\" part (" + part + ")\n");
+					// No need to process the remaining parts...
+					++count;
+					break;
+				}
+			}
+			if (count == 10)
+			{
+				// Enough...
+				break;
+			}
+		}
+
+		bool status = true;
+
+		if (warnings.Length > 0)
+		{
+			if (count == 10)
+			{
+				warnings.Append("Stopped at 10 warnings\n");
+			}
+			Message.printWarning(warning_level, "StateMod_DataSet.checkComponentFilenames",warnings.ToString());
+			status = false;
+		}
+		return status;
+	}
+
+	/// <summary>
+	/// Check the data set components for visibility based on the control file settings.
+	/// If the control settings indicate
+	/// that a file is not needed in a data set, it is marked as not visible and will
+	/// not be shown in display components.  Invisible components are retained in the
+	/// data set because sometimes they are included in the response file but we don't
+	/// want to throw away the data as control settings change.  Only files that are
+	/// impacted by control file settings are checked.
+	/// </summary>
+	public virtual void checkComponentVisibility()
+	{
+		DataSetComponent comp;
+		bool visibility = true;
+
+		// Check for daily data set (some may be reset in other checks below)...
+
+		if (__iday != 0)
+		{
+			visibility = true;
+		}
+		else
+		{
+			visibility = false;
+		}
+		comp = getComponentForComponentType(COMP_STREAMGAGE_NATURAL_FLOW_TS_DAILY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_DEMAND_TS_DAILY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_INSTREAM_DEMAND_TS_DAILY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_WELL_DEMAND_TS_DAILY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_RESERVOIR_TARGET_TS_DAILY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_DELAY_TABLE_DAILY_GROUP);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_DELAY_TABLES_DAILY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_STREAMGAGE_HISTORICAL_TS_DAILY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_DIVERSION_TS_DAILY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_WELL_PUMPING_TS_DAILY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_RESERVOIR_CONTENT_TS_DAILY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+
+		// The stream estimate natural flow time series are always invisible because
+		// they are shared with the stream gage natural time series files...
+
+		comp = getComponentForComponentType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_MONTHLY);
+		if (comp != null)
+		{
+			comp.setVisible(false);
+		}
+		comp = getComponentForComponentType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_DAILY);
+		if (comp != null)
+		{
+			comp.setVisible(false);
+		}
+
+		// Check well data set...
+
+		if (hasWellData(false))
+		{
+			visibility = true;
+		}
+		else
+		{
+			visibility = false;
+		}
+		comp = getComponentForComponentType(COMP_WELL_GROUP);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_WELL_STATIONS);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_WELL_RIGHTS);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_WELL_DEMAND_TS_MONTHLY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		comp = getComponentForComponentType(COMP_WELL_PUMPING_TS_MONTHLY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		if (__iday != 0)
+		{ // Else checked above
+			comp = getComponentForComponentType(COMP_WELL_DEMAND_TS_DAILY);
+			if (comp != null)
+			{
+				comp.setVisible(visibility);
+			}
+			comp = getComponentForComponentType(COMP_WELL_PUMPING_TS_DAILY);
+			if (comp != null)
+			{
+				comp.setVisible(visibility);
+			}
+		}
+
+		// Check instream demand flag (component is in the instream flow group)...
+
+		if ((__ireach == 2) || (__ireach == 3))
+		{
+			visibility = true;
+		}
+		else
+		{
+			visibility = false;
+		}
+		comp = getComponentForComponentType(COMP_INSTREAM_DEMAND_TS_MONTHLY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+
+		// Check SJRIP flag...
+
+		if (__isjrip != 0)
+		{
+			visibility = true;
+		}
+		else
+		{
+			visibility = false;
+		}
+		comp = getComponentForComponentType(COMP_SANJUAN_RIP);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+
+		// Check irrigation practice flag (component is in the diversion group)...
+
+		if (__itsfile != 0)
+		{
+			visibility = true;
+		}
+		else
+		{
+			visibility = false;
+		}
+		comp = getComponentForComponentType(COMP_IRRIGATION_PRACTICE_TS_YEARLY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+
+		// Check variable efficiency flag (component is in the diversions group)...
+
+		if (__ieffmax != 0)
+		{
+			visibility = true;
+		}
+		else
+		{
+			visibility = false;
+		}
+		comp = getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+		if (__iday != 0)
+		{ // Else already check above
+			comp = getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY);
+			if (comp != null)
+			{
+				comp.setVisible(visibility);
+			}
+		}
+
+		// Check the soil moisture flag (component is in the diversions group)...
+
+		if (__soild != 0.0)
+		{
+			visibility = true;
+		}
+		else
+		{
+			visibility = false;
+		}
+		comp = getComponentForComponentType(COMP_STATECU_STRUCTURE);
+		if (comp != null)
+		{
+			comp.setVisible(visibility);
+		}
+
+		// Hide the Network (Graphical) file until it is fully implemented...
+
+		comp = getComponentForComponentType(COMP_NETWORK);
+		if (comp != null && comp.hasData())
+		{
+			comp.setVisible(true);
+		}
+	}
+
+	/// <summary>
+	/// Create a Network from a StateMod river network data set component.
+	/// </summary>
+	/* TODO SAM 2007-02-18 Evaluate whether needed
+	private Network createNetworkFromStateModRiverNetwork()
+	{	Network network = new Network ();
+		
+		DataSetComponent comp = getComponentForComponentType(COMP_RIVER_NETWORK );
+		if ( comp == null ) {
+			return null;
+		}
+		Vector net_data = (Vector)comp.getData();
+		if ( net_data == null ) {
+			return null;
+		}
+		Vector div_data = (Vector)getComponentForComponentType(
+					COMP_DIVERSION_STATIONS).getData();
+		Vector res_data = (Vector)getComponentForComponentType(
+					COMP_RESERVOIR_STATIONS).getData();
+		Vector isf_data = (Vector)getComponentForComponentType(
+					COMP_INSTREAM_STATIONS).getData();
+		Vector wel_data = (Vector)getComponentForComponentType(
+					COMP_WELL_STATIONS).getData();
+		Vector sta_data = (Vector)getComponentForComponentType(
+					COMP_STREAMGAGE_STATIONS).getData();
+		StateMod_Data smdata = null;
+		StateMod_StreamGage stadata = null;
+		StateMod_RiverNetworkNode rivnode = null;
+		int pos = 0;	// Position of a data object in the above data vectors.
+		String id = "";
+		String warning = "";
+	
+		// First add all the features to the network...
+	
+		int size = net_data.size();
+		for ( int i = 0; i < size; i++ ) {
+			rivnode = (StateMod_RiverNetworkNode)net_data.elementAt(i);
+			id = rivnode.getID();
+			if ( id.equals("") ) {
+				warning += "\nRiver node [" + i + "] has no identifier";
+				continue;
+			}
+			//Message.printStatus ( 1, routine, "Adding node \"" + id+"\"");
+			if (	(pos = StateMod_Util.locateIndexFromID(
+				id, div_data)) >= 0 ) {
+				smdata = (StateMod_Data)div_data.elementAt(pos);
+				network.addFeature ( new StateMod_Diversion_Node( id,
+					smdata.getName() ) );
+			}
+			else if((pos = StateMod_Util.locateIndexFromID(
+				id, res_data)) >= 0 ) {
+				smdata = (StateMod_Data)res_data.elementAt(pos);
+				network.addFeature ( new StateMod_Reservoir_Node( id,
+					smdata.getName() ) );
+			}
+			else if((pos = StateMod_Util.locateIndexFromID(
+				id, isf_data)) >= 0 ) {
+				smdata = (StateMod_Data)isf_data.elementAt(pos);
+				network.addFeature ( new StateMod_InstreamFlow_Node( id,
+					smdata.getName() ) );
+			}
+			else if((pos = StateMod_Util.locateIndexFromID(
+				id, wel_data)) >= 0 ) {
+				smdata = (StateMod_Data)wel_data.elementAt(pos);
+				network.addFeature ( new StateMod_Well_Node( id,
+					smdata.getName() ) );
+			}
+			else if((pos = StateMod_Util.locateIndexFromID(
+				id, wel_data)) >= 0 ) {
+				stadata =(StateMod_StreamGage)sta_data.elementAt(pos);
+				// In the river station file but only truly a stream
+				// station if it has historical time series..
+				// TODO - this is handled better now.
+				if (	(stadata.getHistoricalMonthTS() != null) ||
+					(stadata.getHistoricalDayTS() != null) ) {
+					network.addFeature (
+					new StateMod_StreamGage_Node( id,
+					smdata.getName() ) );
+				}
+				else {
+					// Add as an "other" node - probably included as a natural flow node...
+					network.addFeature ( new StateMod_Other_Node(id, rivnode.getName() ) );
+				}
+			}
+			else {
+				network.addFeature ( new StateMod_Other_Node( id, rivnode.getName() ) );
+				warning += "\nRiver node \"" + id +
+					"\" not found in station files.  Adding as OTHER type.";
+			}
+		}
+		if ( !warning.equals("") ) {
+			//Message.printWarning ( 1, routine, warning );
+		}
+	
+		return network;
+	}
+	*/
+
+	/// <summary>
+	/// Helper method to check to see whether a file is empty.  Traditionally, StateMod
+	/// data files have been set to "xxxx.dum" or "dummy", which were non-existent or
+	/// empty files, as place-holders for data.  This can cause read errors if code
+	/// attempts to read the files. </summary>
+	/// <param name="filename"> Name of file to check. </param>
+	/// <returns> true if the file is empty (therefore don't try to read) or false if the
+	/// file does not exist or exists but has zero size. </returns>
+	private static bool fileIsEmpty(string filename)
+	{
+		File f = new File(filename);
+		if (!f.exists() || (f.length() == 0L))
+		{
+			return true; // File is empty.
+		}
+		return false; // File might have data.
+	}
+
+	/// <summary>
+	/// Finalize before garbage collection. </summary>
+	/// <exception cref="Throwable"> if an error occurs. </exception>
+//JAVA TO C# CONVERTER WARNING: Method 'throws' clauses are not available in .NET:
+//ORIGINAL LINE: protected void finalize() throws Throwable
+	~StateMod_DataSet()
+	{
+//JAVA TO C# CONVERTER NOTE: The base class finalizer method is automatically called in C#:
+//		base.finalize();
+	}
+
+	/// <summary>
+	/// Retrieve detailed call water right ID </summary>
+	/// <returns> __ccall </returns>
+	public virtual string getCcall()
+	{
+		return __ccall;
+	}
+
+	/// <summary>
+	/// Get the factor for converting reservoir content data to AF </summary>
+	/// <returns> __cfacto </returns>
+	public virtual double getCfacto()
+	{
+		return __cfacto;
+	}
+
+	/// <summary>
+	/// Return the component's data file name for a requested time series data type. </summary>
+	/// <returns> the component's data file name for a requested time series data type, or "". </returns>
+	/// <param name="data_type"> The time series data type to match, as per __component_ts_data_types. </param>
+	/// <param name="interval"> A data interval TimeInterval.MONTH or TimeInterval.DAY. </param>
+	public virtual string getComponentDataFileNameFromTimeSeriesDataType(string data_type, int interval)
+	{
+		int length = __component_ts_data_types.Length;
+		for (int i = 0; i < length; i++)
+		{
+			if (__component_ts_data_types[i].Equals(data_type, StringComparison.OrdinalIgnoreCase) && (__component_ts_data_intervals[i] == interval))
+			{
+				return getComponentForComponentType(i).getDataFileName();
+			}
+		}
+		return "";
+	}
+
+	/// <summary>
+	/// Return the default file extension for a component. </summary>
+	/// <returns> the default file extension for a component. </returns>
+	public virtual string getComponentFileExtension(int component_type)
+	{
+		return __component_file_extensions[component_type];
+	}
+
+	/// <summary>
+	/// Return the complete array of file extensions. </summary>
+	/// <returns> the complete array of file extensions. </returns>
+	public virtual string[] getComponentFileExtensions()
+	{
+		return __component_file_extensions;
+	}
+
+	/// <summary>
+	/// Return the array of component group numbers. </summary>
+	/// <returns> the array of component group numbers. </returns>
+	public virtual int[] getComponentGroupNumbers()
+	{
+		return __component_groups;
+	}
+
+	/// <summary>
+	/// Get the calendar/water/irrigation year </summary>
+	/// <returns> year type for data set </returns>
+	public virtual YearType getCyrl()
+	{
+		return __cyrl;
+	}
+
+	/// <summary>
+	/// Determine the full path to a component data file.  This prepends the data set
+	/// directory to the component data file name (which may be relative to the data
+	/// set directory).  See also getDataFilePathAbsolute(). </summary>
+	/// <param name="file"> File name(e.g., from component getFileName()). </param>
+	/// <returns> Full path to the data file, relative to the data set directory if the
+	/// component data file is relative. </returns>
+	public virtual string getDataFilePath(string file)
+	{
+		if (IOUtil.isAbsolute(file))
+		{
+			// Make sure that the path has the leading drive from the data set...
+			File f = new File(file);
+			if (f.isAbsolute())
+			{
+				return file;
+			}
+			else
+			{
+				// Has a leading slash but needs the drive.  If for some
+				// reason the data set directory does not have a drive, an empty string will be returned.
+				return IOUtil.getDrive(getDataSetDirectory()) + file;
+			}
+		}
+		else
+		{
+			return getDataSetDirectory() + File.separator + file;
+		}
+	}
+
+	/// <summary>
+	/// Determine the full path to a component data file, including accounting for the
+	/// working directory.  If the file is already an absolute path, the same value is
+	/// returned.  Otherwise, the data set directory is prepended to the component data
+	/// file name (which may be relative to the data set directory) and then calls IOUtil.getPathUsingWorkingDir(). </summary>
+	/// <param name="comp"> Data set component. </param>
+	/// <returns> Full path to the data file (absolute), using the working directory. </returns>
+	public virtual string getDataFilePathAbsolute(DataSetComponent comp)
+	{
+		string file = comp.getDataFileName();
+		return getDataFilePathAbsolute(file);
+	}
+
+	/// <summary>
+	/// Determine the full path to a component data file, including accounting for the
+	/// working directory.  If the file is already an absolute path, the same value is
+	/// returned.  Otherwise, the data set directory is prepended to the component data
+	/// file name (which may be relative to the data set directory) and then calls IOUtil.getPathUsingWorkingDir(). </summary>
+	/// <param name="file"> File name(e.g., from component getFileName()). </param>
+	/// <returns> Full path to the data file (absolute), using the working directory. </returns>
+	public virtual string getDataFilePathAbsolute(string file)
+	{
+		if (IOUtil.isAbsolute(file))
+		{
+			return file;
+		}
+		else
+		{
+			return IOUtil.getPathUsingWorkingDir(getDataSetDirectory() + File.separator + file);
+		}
+	}
+
+	/// <summary>
+	/// Returns the file name for the given component, relative to the main directory for the state mod files. </summary>
+	/// <param name="comp"> the number of the component to return the relative path for. </param>
+	/// <returns> the relative path file name of the component's data file. </returns>
+	public virtual string getDataFilePathRelative(int comp)
+	{
+		return getDataFilePathRelative(getComponentForComponentType(comp).getDataFileName());
+	}
+
+	/// <summary>
+	/// Returns the path to the passed-in filename, relative to the main directory for the state mod files. </summary>
+	/// <param name="file"> a filename </param>
+	/// <returns> the relative path of the file from the state mod directory, or if it
+	/// is on another drive, the full path. </returns>
+	public virtual string getDataFilePathRelative(string file)
+	{
+		if (file.Trim().StartsWith(".", StringComparison.Ordinal))
+		{
+			if (file.Trim().StartsWith("." + File.separator, StringComparison.Ordinal))
+			{
+				file = file.Substring(2);
+			}
+			// already in relative format
+			return file;
+		}
+
+		if (file.IndexOf(File.separator) > -1)
+		{
+			// file has a directory structure, convert to relative
+			try
+			{
+				return IOUtil.toRelativePath(getDataSetDirectory(), file);
+			}
+			catch (Exception)
+			{
+				return getDataFilePathAbsolute(file);
+			}
+		}
+		else
+		{
+			// just a filename, return as is
+			return file;
+		}
+	}
+
+	/// <summary>
+	/// Return a concatenation of the data component data check results.
+	/// The results are listed in the order of data components. </summary>
+	/// <returns> a concatenation of the data component data check results. </returns>
+	public virtual System.Collections.IList getDataCheckResults()
+	{ // Loop through the components and append to the overall data check results...
+		System.Collections.IList check_Vector = new List<object>();
+		System.Collections.IList data_Vector = getComponents();
+		int size = 0;
+		if (data_Vector != null)
+		{
+			size = data_Vector.Count;
+		}
+		DataSetComponent comp;
+		System.Collections.IList check_Vector2 = null; // Data check comments from a component
+		for (int i = 0; i < size; i++)
+		{
+			comp = (DataSetComponent)data_Vector[i];
+			if (comp.isGroup())
+			{
+				// Process components within the group...
+				System.Collections.IList data2 = (System.Collections.IList)comp.getData();
+				int size2 = 0;
+				if (data2 != null)
+				{
+					size2 = data2.Count;
+				}
+				for (int j = 0; j < size2; j++)
+				{
+					comp = (DataSetComponent)data2[j];
+					// Append the data check results, if available...
+					check_Vector2 = comp.getDataCheckResults();
+					if ((check_Vector2 != null) && (check_Vector2.Count > 0))
+					{
+						check_Vector.Add("");
+						check_Vector.Add("====================================" + "====================================" + "========");
+						check_Vector.Add("DATA CHECK RESULTS FOR: " + comp.getComponentName());
+						check_Vector.Add("");
+						check_Vector = StringUtil.addListToStringList(check_Vector, comp.getDataCheckResults());
+					}
+				}
+			}
+		}
+		if (check_Vector.Count > 0)
+		{
+			check_Vector.Insert(0, "");
+			check_Vector.Insert(1, "Data check results are " + "listed for output products that have potential data issues.");
+			check_Vector.Insert(2, "The following data check results are listed in order of " + "StateDMI components (data products).");
+			check_Vector.Insert(3, "");
+		}
+		return check_Vector;
+	}
+
+	/// <summary>
+	/// Return a list of String containing information about
+	/// an object.  This is useful, for example, to see what reservoirs use an
+	/// evaporation station, what diversions use a delay table, etc.). </summary>
+	/// <param name="comp_type"> Component type to examine. </param>
+	/// <param name="id"> Identifier of specific object to examine. </param>
+	public virtual IList<string> getDataObjectDetails(int comp_type, string id)
+	{
+		IList<string> v = new List<object>();
+		DataSetComponent comp1; // "1" corresponds to "id" above
+		System.Collections.IList data1;
+		int pos1;
+		DataSetComponent comp2; // "2" corresponds to the first
+		System.Collections.IList data2; // level of related data
+		int size2;
+		System.Collections.IList data3; // level of related data
+		int size3;
+		StateMod_Diversion div; // All these are for general use
+		StateMod_RiverNetworkNode netnode; // below
+		StateMod_Reservoir res;
+		StateMod_ReservoirClimate climate;
+		if (comp_type == COMP_DIVERSION_STATIONS)
+		{
+			comp1 = getComponentForComponentType(StateMod_DataSet.COMP_DIVERSION_STATIONS);
+			data1 = (System.Collections.IList)comp1.getData();
+			pos1 = StateMod_Util.IndexOf(data1, id);
+			div = (StateMod_Diversion)data1[pos1];
+			v.Add("Data set details for diversion: " + StateMod_Util.formatDataLabel(id, div.getName()));
+			v.Add("Network nodes that are directly upstream:");
+			v.Add("");
+			v.Add("Upstream");
+			v.Add("Node ID       Upstream Node Name                  ");
+			v.Add("--------------------------------------------------");
+			comp2 = getComponentForComponentType(StateMod_DataSet.COMP_RIVER_NETWORK);
+			data2 = (System.Collections.IList)comp2.getData();
+			size2 = data2.Count;
+			for (int i = 0; i < size2; i++)
+			{
+				netnode = (StateMod_RiverNetworkNode)data2[i];
+				if (netnode.getCstadn().Equals(id, StringComparison.OrdinalIgnoreCase))
+				{
+					v.Add(StringUtil.formatString(netnode.getID(),"%-12.12s") + "  " + StringUtil.formatString(netnode.getName(),"%-24.24s"));
+				}
+			}
+			v.Add("");
+			v.Add("Search of nodes that return to this diversion - not implemented");
+			v.Add("");
+			v.Add("Search of diversion rights for this diversion - not implemented");
+			v.Add("");
+			v.Add("Search of operational rights using this diversion - not implemented");
+			v.Add("");
+			v.Add("Search of stream estimate node for this diversion - not implemented");
+			v.Add("");
+			v.Add("Search of time series for this diversion - not implemented");
+			v.Add("Search of soil moisture for this diversion - not implemented");
+			v.Add("Search of irrigation practice for diversion - not implemented");
+		}
+		else if (comp_type == COMP_PRECIPITATION_TS_MONTHLY)
+		{
+			v.Add("Data set details for precipitation time series: " + id);
+			v.Add("Reservoirs that use the time series:");
+			v.Add("");
+			v.Add("Res ID        Res Name                  Weight (%)");
+			v.Add("--------------------------------------------------");
+			comp2 = getComponentForComponentType(StateMod_DataSet.COMP_RESERVOIR_STATIONS);
+			data2 = (System.Collections.IList)comp2.getData();
+			size2 = data2.Count;
+			for (int i = 0; i < size2; i++)
+			{
+				res = (StateMod_Reservoir)data2[i];
+				data3 = res.getClimates();
+				size3 = data3.Count;
+				for (int j = 0; j < size3; j++)
+				{
+					climate = (StateMod_ReservoirClimate)data3[j];
+					if ((climate.getType() == StateMod_ReservoirClimate.CLIMATE_PTPX) && climate.getID().Equals(id, StringComparison.OrdinalIgnoreCase))
+					{
+						// Found a reservoir that uses the station...
+						v.Add(StringUtil.formatString(res.getID(),"%-12.12s") + "  " + StringUtil.formatString(res.getName(),"%-24.24s") + "  " + StringUtil.formatString(climate.getWeight(),"%8.2f"));
+					}
+				}
+			}
+		}
+		else if (comp_type == COMP_EVAPORATION_TS_MONTHLY)
+		{
+			v.Add("Data set details for evaporation time series: " + id);
+			v.Add("Reservoirs that use the time series:");
+			v.Add("");
+			v.Add("Res ID        Res Name                  Weight (%)");
+			v.Add("--------------------------------------------------");
+			comp2 = getComponentForComponentType(StateMod_DataSet.COMP_RESERVOIR_STATIONS);
+			data2 = (System.Collections.IList)comp2.getData();
+			size2 = data2.Count;
+			for (int i = 0; i < size2; i++)
+			{
+				res = (StateMod_Reservoir)data2[i];
+				data3 = res.getClimates();
+				size3 = data3.Count;
+				for (int j = 0; j < size3; j++)
+				{
+					climate = (StateMod_ReservoirClimate)data3[j];
+					if ((climate.getType() == StateMod_ReservoirClimate.CLIMATE_EVAP) && climate.getID().Equals(id, StringComparison.OrdinalIgnoreCase))
+					{
+						// Found a reservoir that uses the station...
+						v.Add(StringUtil.formatString(res.getID(),"%-12.12s") + "  " + StringUtil.formatString(res.getName(),"%-24.24s") + "  " + StringUtil.formatString(climate.getWeight(),"%8.2f"));
+					}
+				}
+			}
+		}
+		return v;
+	}
+
+	/// <summary>
+	/// Return the data set type name.  This method calls lookupTypeName() for the instance. </summary>
+	/// <returns> the data set type name. </returns>
+	public virtual string getDataSetTypeName()
+	{
+		return lookupTypeName(getDataSetType());
+	}
+
+	/// <summary>
+	/// Return a DateTime corresponding to the latest data.  Daily precision is always
+	/// returned and calendar dates are used. </summary>
+	/// <returns> a DateTime corresponding to the latest data. </returns>
+	public virtual DateTime getDataEnd()
+	{
+		DateTime d = StateMod_Util.findLatestDateInPOR(this);
+		d.setDay(TimeUtil.numDaysInMonth(d.getMonth(), d.getYear()));
+		return d;
+	}
+
+	/// <summary>
+	/// Return a DateTime corresponding to the earliest data.  Daily precision is always
+	/// returned and calendar dates are used. </summary>
+	/// <returns> a DateTime corresponding to the earliest data. </returns>
+	public virtual DateTime getDataStart()
+	{
+		DateTime d = StateMod_Util.findEarliestDateInPOR(this);
+		d.setDay(1);
+		return d;
+	}
+
+	/// <summary>
+	/// Get the divisor for diversion data units </summary>
+	/// <returns> __dfacto </returns>
+	public virtual double getDfacto()
+	{
+		return __dfacto;
+	}
+
+	/// <summary>
+	/// Get the factor for converting evaporation data to FT </summary>
+	/// <returns> __efacto </returns>
+	public virtual double getEfacto()
+	{
+		return __efacto;
+	}
+
+	/// <summary>
+	/// Return factor for converting CFS to AF/Day (1.9835). </summary>
+	/// <returns> __factor </returns>
+	public virtual double getFactor()
+	{
+		return __factor;
+	}
+
+	/// <summary>
+	/// Get the divisor for instreamflow data units </summary>
+	/// <returns> __ffacto </returns>
+	public virtual double getFfacto()
+	{
+		return __ffacto;
+	}
+
+	/// <summary>
+	/// Get the gwmaxrc value. </summary>
+	/// <returns> __gwmaxrc </returns>
+	public virtual double getGwmaxrc()
+	{
+		return __gwmaxrc;
+	}
+
+	/// <summary>
+	/// Return first line of heading. </summary>
+	/// <returns> __heading1 </returns>
+	public virtual string getHeading1()
+	{
+		return __heading1;
+	}
+
+	/// <summary>
+	/// Return second line of heading. </summary>
+	/// <returns> __heading2 </returns>
+	public virtual string getHeading2()
+	{
+		return __heading2;
+	}
+
+	/// <summary>
+	/// Get the switch for detailed call data </summary>
+	/// <returns> __icall </returns>
+	public virtual int getIcall()
+	{
+		return __icall;
+	}
+
+	/// <summary>
+	/// Get the switch for detailed printout </summary>
+	/// <returns> __ichk </returns>
+	public virtual int getIchk()
+	{
+		return __ichk;
+	}
+
+	/// <summary>
+	/// Get the switch for demand printout </summary>
+	/// <returns> __icondem </returns>
+	public virtual int getIcondem()
+	{
+		return __icondem;
+	}
+
+	/// <summary>
+	/// Get the switch for daily calculations
+	/// The hasDailyData() should be used in most cases.  Only use getIday() in code
+	/// that is changing/writing the raw value. </summary>
+	/// <returns> __iday </returns>
+	public virtual int getIday()
+	{
+		return __iday;
+	}
+
+	/// <summary>
+	/// Get the ieffmax value.
+	/// The hasIrrigationWaterRequirementData() should be used in most cases.  Only use
+	/// getIeffmax() in code that is changing/writing the raw value. </summary>
+	/// <returns> __ieffmax </returns>
+	public virtual int getIeffmax()
+	{
+		return __ieffmax;
+	}
+
+	/// <summary>
+	/// Retrieve max number of entries in a delay pattern. </summary>
+	/// <returns> __interv </returns>
+	public virtual int getInterv()
+	{
+		return __interv;
+	}
+
+	/// <summary>
+	/// Retrieve streamflow type(total or gains streamflow). </summary>
+	/// <returns> __iopflo </returns>
+	public virtual int getIopflo()
+	{
+		return __iopflo;
+	}
+
+	/// <summary>
+	/// Get the switch for instream flow reach approach
+	/// The hasMonthlyISFData() should be used in most cases.  Only use getIreach() in
+	/// code that is changing/writing the raw value. </summary>
+	/// <returns> __ireach </returns>
+	public virtual int getIreach()
+	{
+		return __ireach;
+	}
+
+	/// <summary>
+	/// Get the switch for reoperation control. </summary>
+	/// <returns> __ireopx </returns>
+	public virtual int getIreopx()
+	{
+		return __ireopx;
+	}
+
+	/// <summary>
+	/// Return switch for output. </summary>
+	/// <returns> __iresop </returns>
+	public virtual int getIresop()
+	{
+		return __iresop;
+	}
+
+	/// <summary>
+	/// Return switch for output significant figures. </summary>
+	/// <returns> __isig </returns>
+	public virtual int getIsig()
+	{
+		return __isig;
+	}
+
+	/// <summary>
+	/// Get the isjrip value.
+	/// The hasSanJuanData() should be used in most cases.  Only use getIsjrip() in code
+	/// that is changing/writing the raw value. </summary>
+	/// <returns> __isjrip </returns>
+	public virtual int getIsjrip()
+	{
+		return __isjrip;
+	}
+
+	/// <summary>
+	/// Get the isprink value. </summary>
+	/// <returns> __isprink </returns>
+	public virtual int getIsprink()
+	{
+		return __isprink;
+	}
+
+	/// <summary>
+	/// Get the itsfile value.
+	/// The hasIrrigationPracticeData() should be used in most cases.  Only use
+	/// getItsfile() in code that is changing/writing the raw value. </summary>
+	/// <returns> __itsfile </returns>
+	public virtual int getItsfile()
+	{
+		return __itsfile;
+	}
+
+	/// <summary>
+	/// Get the switch for well calculations.
+	/// The hasWellData() should be used in most cases.  Only use getIwell() in code that is changing/writing the raw value. </summary>
+	/// <returns> __iwell </returns>
+	public virtual int getIwell()
+	{
+		return __iwell;
+	}
+
+	/// <summary>
+	/// Return ending year of the simulation. </summary>
+	/// <returns> __iyend </returns>
+	public virtual int getIyend()
+	{
+		return __iyend;
+	}
+
+	/// <summary>
+	/// Return starting year of the simulation. </summary>
+	/// <returns> __iystr </returns>
+	public virtual int getIystr()
+	{
+		return __iystr;
+	}
+
+	/// <summary>
+	/// Return a list of String containing information about modified data in the data
+	/// set.  This can be used during development to see how a GUI modifies data when it is set.
+	/// </summary>
+	public virtual IList<string> getModifiedDataSummary()
+	{
+		IList<string> v = new List<object>();
+
+		v.Add("Summary of data objects that have been modified in computer memory");
+		v.Add("but not yet written to files.");
+		v.Add("Components are listed by data group and files within each group.");
+		v.Add("");
+
+		DataSetComponent comp1;
+		System.Collections.IList data1;
+		int size1;
+
+		// Stream gage...
+
+		v.Add("");
+		v.Add("Stream Gage Data are not checked.");
+		v.Add("");
+
+		// Delay Table (Monthly)...
+
+		v.Add("");
+		v.Add("Delay Tables (Monthly) are not checked.");
+		v.Add("");
+
+		// Delay Table (Daily)...
+
+		v.Add("");
+		v.Add("Delay Tables (Daily) are not checked.");
+		v.Add("");
+
+		// Diversions...
+
+		comp1 = getComponentForComponentType(COMP_DIVERSION_STATIONS);
+		if (comp1.hasData())
+		{
+		v.Add(comp1.getComponentName());
+		v.Add("");
+		v.Add("Diversion ID  Diversion Name");
+		v.Add("-----------------------------------------");
+		data1 = (System.Collections.IList)comp1.getData();
+		size1 = data1.Count;
+		StateMod_Data smdata1;
+		for (int i = 0; i < size1; i++)
+		{
+			smdata1 = (StateMod_Data)data1[i];
+			if (smdata1.isDirty())
+			{
+				v.Add(StringUtil.formatString(smdata1.getID(),"%-12.12s") + "  " + StringUtil.formatString(smdata1.getName(), "%-24.24s"));
+			}
+		}
+		} // End comp1.hasData()
+
+		comp1 = getComponentForComponentType(COMP_DIVERSION_RIGHTS);
+		if (comp1.hasData())
+		{
+			v.Add("");
+			v.Add(comp1.getComponentName());
+			v.Add("");
+			v.Add("Div Right ID   Diversion Name");
+			v.Add("-----------------------------------------");
+			data1 = (System.Collections.IList)comp1.getData();
+			size1 = data1.Count;
+			StateMod_Data smdata1;
+			for (int i = 0; i < size1; i++)
+			{
+				smdata1 = (StateMod_Data)data1[i];
+				if (smdata1.isDirty())
+				{
+					v.Add(StringUtil.formatString(smdata1.getID(),"%-12.12s") + "  " + StringUtil.formatString(smdata1.getName(), "%-24.24s"));
+				}
+			}
+		} // End comp1.hasData()
+
+		v.Add("");
+		v.Add("Diversion time series data are not checked.");
+		v.Add("");
+
+		// Precipitation time series (monthly)...
+
+		v.Add("");
+		v.Add("Precipitation data are not checked.");
+		v.Add("");
+
+	/*
+		comp1 = getComponentForComponentType ( COMP_PRECIPITATION_TS_MONTHLY );
+		if ( comp1.hasData() ) {
+		v.addElement ( comp1.getComponentName() );
+		v.addElement ( "" );
+		v.addElement (
+		"Precip TS ID   Precip TS Name" );
+		v.addElement ( "-----------------------------------------");
+		data1 = (Vector)comp1.getData();
+		size1 = data1.size();
+		String id;
+		boolean found = false;
+		for ( int i = 0; i < size1; i++ ) {
+			found = false;
+			ts = (TS)data1.elementAt(i);
+			id = ts.getLocation();
+			StateMod_Reservoir res;
+			comp2 = getComponentForComponentType (
+				StateMod_DataSet.COMP_RESERVOIR_STATIONS );
+			data2 = (Vector)comp2.getData();
+			size2 = data2.size();
+			Vector climates;
+			StateMod_ReservoirClimate climate;
+			for ( int j = 0; j < size2; j++ ) {
+				res = (StateMod_Reservoir)data2.elementAt(j);
+				climates = res.getClimates();
+				size3 = climates.size();
+				for ( int k = 0; k < size3; k++ ) {
+					climate = (StateMod_ReservoirClimate)
+						climates.elementAt(k);
+					if (	(climate.getType() ==
+						StateMod_ReservoirClimate.CLIMATE_PTPX)
+						&&climate.getID().equalsIgnoreCase(id)){
+						// Found a reservoir that uses the
+						// station...
+						found = true;
+						break;
+					}
+				}
+			}
+			if ( !found ) {
+				// The precipitation station is not used in the data
+				// set so print...
+				v.addElement (
+					StringUtil.formatString(id,"%-12.12s") + "  " + 
+					StringUtil.formatString( ts.getDescription(),
+					"%-24.24s") );
+			}
+		}
+		} // End if comp1.hasData()
+	*/
+
+		// Evaporation time series (monthly)...
+
+		v.Add("");
+		v.Add("Evaporation data are not checked.");
+		v.Add("");
+
+	/*
+		comp1 = getComponentForComponentType ( COMP_EVAPORATION_TS_MONTHLY );
+		if ( comp1.hasData() ) {
+		v.addElement ( comp1.getComponentName() );
+		v.addElement ( "" );
+		v.addElement (
+		"Evap TS ID    Evap TS Name" );
+		v.addElement ( "-----------------------------------------");
+		data1 = (Vector)comp1.getData();
+		size1 = data1.size();
+		String id;
+		boolean found = false;
+		for ( int i = 0; i < size1; i++ ) {
+			found = false;
+			ts = (TS)data1.elementAt(i);
+			id = ts.getLocation();
+			StateMod_Reservoir res;
+			comp2 = getComponentForComponentType (
+				StateMod_DataSet.COMP_RESERVOIR_STATIONS );
+			data2 = (Vector)comp2.getData();
+			size2 = data2.size();
+			Vector climates;
+			StateMod_ReservoirClimate climate;
+			for ( int j = 0; j < size2; j++ ) {
+				res = (StateMod_Reservoir)data2.elementAt(j);
+				climates = res.getClimates();
+				size3 = climates.size();
+				for ( int k = 0; k < size3; k++ ) {
+					climate = (StateMod_ReservoirClimate)
+						climates.elementAt(k);
+					if (	(climate.getType() ==
+						StateMod_ReservoirClimate.CLIMATE_EVAP)
+						&&climate.getID().equalsIgnoreCase(id)){
+						// Found a reservoir that uses the
+						// station...
+						found = true;
+						break;
+					}
+				}
+			}
+			if ( !found ) {
+				// The evaporation station is not used in the data
+				// set so print...
+				v.addElement (
+					StringUtil.formatString(id,"%-12.12s") + "  " + 
+					StringUtil.formatString( ts.getDescription(),
+					"%-24.24s") );
+			}
+		}
+		} // End if comp1.hasData()
+	*/
+
+		// Reservoirs...
+
+		v.Add("");
+		v.Add("Reservoirs are not checked.");
+		v.Add("");
+
+		// Instream flows...
+
+		v.Add("");
+		v.Add("Instream flows are not checked.");
+		v.Add("");
+
+		// Wells...
+
+		v.Add("");
+		v.Add("Wells are not checked.");
+		v.Add("");
+
+		// Plans...
+
+		v.Add("");
+		v.Add("Plans are not checked.");
+		v.Add("");
+
+		// Stream Estimate stations...
+
+		v.Add("");
+		v.Add("Stream estimate stations are not checked.");
+		v.Add("");
+
+		// River network...
+
+		v.Add("");
+		v.Add("River network data are not checked.");
+		v.Add("");
+
+		// Operational rights.
+
+		v.Add("");
+		v.Add("Operational rights data are not checked.");
+		v.Add("");
+
+		return v;
+	}
+
+	/// <summary>
+	/// Retrieve type of evaporation data, monthly or average. </summary>
+	/// <returns> __moneva </returns>
+	public virtual int getMoneva()
+	{
+		return __moneva;
+	}
+
+	/// <summary>
+	/// Return number of evaporation stations. </summary>
+	/// <returns> __numeva </returns>
+	public virtual int getNumeva()
+	{
+		return __numeva;
+	}
+
+	/// <summary>
+	/// Return number of precipitation stations. </summary>
+	/// <returns> __numpre </returns>
+	public virtual int getNumpre()
+	{
+		return __numpre;
+	}
+
+	/// <summary>
+	/// Get the factor for converting precipitation data to FT </summary>
+	/// <returns> __pfacto </returns>
+	public virtual double getPfacto()
+	{
+		return __pfacto;
+	}
+
+	/// <summary>
+	/// Return the divisor for streamflow data units. </summary>
+	/// <returns> __rfacto </returns>
+	public virtual double getRfacto()
+	{
+		return __rfacto;
+	}
+
+	/// <summary>
+	/// Return a DateTime corresponding to the run end.  Daily precision is always
+	/// returned and calendar dates are used. </summary>
+	/// <returns> a DateTime corresponding to the run end. </returns>
+	public virtual DateTime getRunEnd()
+	{
+		DateTime d = new DateTime(DateTime.PRECISION_DAY);
+		if (__cyrl == YearType.WATER)
+		{
+			d.setMonth(9);
+		}
+		else if (__cyrl == YearType.NOV_TO_OCT)
+		{
+			d.setMonth(10);
+		}
+		else
+		{
+			// Calendar...
+			d.setMonth(12);
+		}
+		d.setYear(__iyend);
+		d.setDay(TimeUtil.numDaysInMonth(d.getMonth(), d.getYear()));
+		return d;
+	}
+
+	/// <summary>
+	/// Return a DateTime corresponding to the run start.  Daily precision is always
+	/// returned and calendar dates are used. </summary>
+	/// <returns> a DateTime corresponding to the earliest data. </returns>
+	public virtual DateTime getRunStart()
+	{
+		DateTime d = new DateTime(DateTime.PRECISION_DAY);
+		d.setDay(1);
+		if (__cyrl == YearType.WATER)
+		{
+			d.setMonth(10);
+			d.setYear(__iystr - 1);
+		}
+		else if (__cyrl == YearType.NOV_TO_OCT)
+		{
+			d.setMonth(11);
+			d.setYear(__iystr - 1);
+		}
+		else
+		{ // Calendar...
+			d.setMonth(1);
+			d.setYear(__iystr);
+		}
+		return d;
+	}
+
+	/// <summary>
+	/// Get the value of soild. 
+	/// The hasSoilMoistureData() should be used in most cases.  Only use
+	/// getSoild() in code that is changing/writing the raw value. </summary>
+	/// <returns> _solid </returns>
+	public virtual double getSoild()
+	{
+		return __soild;
+	}
+
+	/// <summary>
+	/// Return the StateMod response file property for a component. </summary>
+	/// <returns> the StateMod response file property for a component. </returns>
+	public virtual string getStateModFileProperty(int component_type)
+	{
+		return __statemod_file_properties[component_type];
+	}
+
+	/// <summary>
+	/// Return a summary of the data set. </summary>
+	/// <returns> a summary of the data set as a Vector of String. </returns>
+	public virtual IList<string> getSummary()
+	{
+		System.Collections.IList data_Vector = null; // Reuse as needed below.
+		System.Collections.IList rights_Vector = null; // Reuse as needed below.
+		System.Collections.IList infoVector = new List<object>(100);
+		infoVector.Add("                                STATEMOD DATA SET SUMMARY");
+		infoVector.Add("Basin                 : " + getHeading1().Trim());
+		infoVector.Add("Base name (from *.rsp): " + getBaseName());
+		if (!areTSRead())
+		{
+			infoVector.Add("Note:     You elected NOT to read the time series information");
+			infoVector.Add("          after initially selecting this scenario.");
+			infoVector.Add("          Minimal time series information can be provided here.");
+		}
+		infoVector.Add("");
+
+		infoVector.Add("RIVER NETWORK:");
+		infoVector.Add("");
+		data_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_RIVER_NETWORK).getData();
+		int size = data_Vector.Count;
+		infoVector.Add("Number of nodes/stations in network: " + size);
+
+		infoVector.Add("");
+		infoVector.Add("STREAM GAGE STATIONS:");
+		infoVector.Add("");
+		data_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_STREAMGAGE_STATIONS).getData();
+		size = data_Vector.Count;
+		infoVector.Add("Number of stream gage stations: " + size);
+		infoVector.Add("Stream gage stations without geographic locations:");
+		infoVector.Add("             # ID           Name");
+		StateMod_StreamGage sta;
+		int count = 0;
+		for (int i = 0; i < size; i++)
+		{
+			sta = (StateMod_StreamGage)data_Vector[i];
+			if (sta.getGeoRecord() == null)
+			{
+				infoVector.Add("        " + StringUtil.formatString((i + 1),"%6d") + " " + StringUtil.formatString(sta.getID(),"%-12.12s") + " " + sta.getName());
+				++count;
+			}
+		}
+		infoVector.Add("        " + StringUtil.formatString(count,"%6d") + " Total missing");
+		infoVector.Add("");
+
+		infoVector.Add("STREAM ESTIMATE STATIONS (PRORATED FLOW):");
+		infoVector.Add("");
+		data_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_STREAMESTIMATE_STATIONS).getData();
+		size = data_Vector.Count;
+		infoVector.Add("Number of stream estimate stations: " + size);
+	// TODO - do actual counts of non-null time series links.
+	/*
+		infoVector.add("Number of river stations with estimated natural flows: " + _baseflowsVector.size());
+		infoVector.add("Number of stations with monthly base flow " +
+			"time series: " + _baseflowTSVector.size());
+		if (controls.hasDailyData(false)&& _areTSRead) {
+			infoVector.add("Number of river stations with " +
+				"historic daily time series: " +
+				_dailyHistStreamflowTSVector.size());
+			infoVector.add(
+			"Number of stations with daily base flow time series: " +
+			_dailyBaseflowTSVector.size());
+		}
+	*/
+		infoVector.Add("Stream estimate stations without geographic locations:");
+		infoVector.Add("             # ID           Name");
+		StateMod_StreamEstimate bsta;
+		count = 0;
+		for (int i = 0; i < size; i++)
+		{
+			bsta = (StateMod_StreamEstimate)data_Vector[i];
+			if (bsta.getGeoRecord() == null)
+			{
+				infoVector.Add("        " + StringUtil.formatString((i + 1),"%6d") + " " + StringUtil.formatString(bsta.getID(),"%-12.12s") + " " + bsta.getName());
+				++count;
+			}
+		}
+		infoVector.Add("        " + StringUtil.formatString(count,"%6d") + " Total missing");
+		infoVector.Add("");
+
+		infoVector.Add("DELAY TABLE:");
+		infoVector.Add("");
+		data_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_DELAY_TABLES_MONTHLY).getData();
+		size = data_Vector.Count;
+		infoVector.Add("Number of delay tables (monthly): " + size);
+		if (hasDailyData(false))
+		{
+			data_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_DELAY_TABLES_DAILY).getData();
+			size = data_Vector.Count;
+			infoVector.Add("Number of delay tables (daily): " + size);
+		}
+		infoVector.Add("");
+
+		infoVector.Add("DIVERSION STATIONS:");
+		infoVector.Add("");
+		data_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_DIVERSION_STATIONS).getData();
+		size = data_Vector.Count;
+		infoVector.Add("Number of diversion stations: " + size);
+		rights_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_DIVERSION_RIGHTS).getData();
+		int rsize = rights_Vector.Count;
+		infoVector.Add("Number of rights: " + rsize);
+		if (areTSRead())
+		{
+	/* TODO - need actual counts...
+			infoVector.add(
+				"Number of historical monthly time series: " + 
+				_divHistTSVector.size());
+			infoVector.add(
+				"Number of monthly demand time series: " + 
+				_demandTSVector.size());
+			if (controls.hasDailyData(false)) {
+				infoVector.add(
+					"Number of historical daily time series: " + 
+					_dailyHistDiversionTSVector.size());
+				infoVector.add(
+					"Number of daily demand time series: " + 
+					_dailyDemandTSVector.size());
+			}
+	*/
+		}
+		infoVector.Add("Diversion stations without geographic locations:");
+		infoVector.Add("             # ID           Name");
+		StateMod_Diversion div;
+		count = 0;
+		for (int i = 0; i < size; i++)
+		{
+			div = (StateMod_Diversion)data_Vector[i];
+			if (div.getGeoRecord() == null)
+			{
+				infoVector.Add("        " + StringUtil.formatString((i + 1),"%6d") + " " + StringUtil.formatString(div.getID(),"%-12.12s") + " " + div.getName());
+				++count;
+			}
+		}
+		infoVector.Add("        " + StringUtil.formatString(count,"%6d") + " Total missing");
+		infoVector.Add("");
+
+		infoVector.Add("INSTREAM FLOW STATIONS:");
+		infoVector.Add("");
+		data_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_INSTREAM_STATIONS).getData();
+		size = data_Vector.Count;
+		infoVector.Add("Number of instream flow stations:" + size);
+		rights_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_INSTREAM_RIGHTS).getData();
+		rsize = rights_Vector.Count;
+		infoVector.Add("Number of rights: " + rsize);
+		if (areTSRead())
+		{
+	/* TODO 
+			infoVector.add("Number of monthly demand time series: "+
+				_isfMonthlyDemandTSVector.size());
+			infoVector.add(
+				"Number of monthly average demand time series: " + 
+				_isfDemandTSVector.size());
+			if (controls.hasDailyData(false)) {
+				infoVector.add(
+				"Number of daily instream flow demand time series: "+
+				_dailyInsfTSVector.size());
+			}
+	*/
+		}
+		infoVector.Add("Instream flow stations without geographic locations:");
+		infoVector.Add("             # ID           Name");
+		StateMod_InstreamFlow isf;
+		count = 0;
+		for (int i = 0; i < size; i++)
+		{
+			isf = (StateMod_InstreamFlow)data_Vector[i];
+			if (isf.getGeoRecord() == null)
+			{
+				infoVector.Add("        " + StringUtil.formatString((i + 1),"%6d") + " " + StringUtil.formatString(isf.getID(),"%-12.12s") + " " + isf.getName());
+				++count;
+			}
+		}
+		infoVector.Add("        " + StringUtil.formatString(count,"%6d") + " Total missing");
+		infoVector.Add("");
+
+		infoVector.Add("PRECIPITATION STATIONS:");
+		infoVector.Add("");
+		data_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_PRECIPITATION_TS_MONTHLY).getData();
+		size = data_Vector.Count;
+		infoVector.Add("Number of monthly precipitation time series: " + size);
+		infoVector.Add("");
+
+		infoVector.Add("EVAPORATION STATIONS:");
+		infoVector.Add("");
+		data_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_EVAPORATION_TS_MONTHLY).getData();
+		size = data_Vector.Count;
+		infoVector.Add("Number of monthly evaporation time series: " + size);
+		infoVector.Add("");
+
+		infoVector.Add("RESERVOIR STATIONS:");
+		infoVector.Add("");
+		data_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_RESERVOIR_STATIONS).getData();
+		size = data_Vector.Count;
+		infoVector.Add("Number of reservoir stations: " + size);
+		rights_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_RESERVOIR_RIGHTS).getData();
+		rsize = rights_Vector.Count;
+		infoVector.Add("Number of rights: " + rsize);
+		if (areTSRead())
+		{
+	/* TODO
+			infoVector.add(
+				"Number of historical end of month time series: "+ 
+				_eomVector.size());
+			infoVector.add(
+				"Number of monthly min/max target time series: "+
+				_minMaxVector.size()/ 2);
+			if (controls.hasDailyData(false)) {
+				infoVector.add(
+				"Number of historical end of day time series: "+ 
+				_dailyHistResEODTSVector.size());
+				infoVector.add(
+				"Number of daily min/max daily target time series: "+
+				_dailyResTargetTSVector.size()/ 2);
+			}
+	*/
+		}
+		infoVector.Add("Reservoir stations without geographic locations:");
+		infoVector.Add("             # ID           Name");
+		StateMod_Reservoir res;
+		count = 0;
+		for (int i = 0; i < size; i++)
+		{
+			res = (StateMod_Reservoir)data_Vector[i];
+			if (res.getGeoRecord() == null)
+			{
+				infoVector.Add("        " + StringUtil.formatString((i + 1),"%6d") + " " + StringUtil.formatString(res.getID(),"%-12.12s") + " " + res.getName());
+				++count;
+			}
+		}
+		infoVector.Add("        " + StringUtil.formatString(count,"%6d") + " Total missing");
+		infoVector.Add("");
+
+		infoVector.Add("WELL STATIONS:");
+		infoVector.Add("");
+		data_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_WELL_STATIONS).getData();
+		size = data_Vector.Count;
+		infoVector.Add("Number of well stations: " + size);
+		rights_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_WELL_RIGHTS).getData();
+		rsize = rights_Vector.Count;
+		infoVector.Add("Number of rights: " + rsize);
+		if (areTSRead())
+		{
+	/* TODO
+			infoVector.add(
+			"Number of historical monthly well pumping time series: " +
+			_wellHistTSVector.size());
+			infoVector.add(
+			"Number of monthly well demand time series: " +
+			_wellDemandTSVector.size());
+			if (controls.hasDailyData(false)) {
+				infoVector.add(
+				"Number of historical daily well pumping time series: "+
+				_dailyHistWellTSVector.size());
+				infoVector.add(
+				"Number of daily well demand time series: "+
+				_dailyWellDemandTSVector.size());
+			}
+	*/
+		}
+		infoVector.Add("Well stations without geographic locations:");
+		infoVector.Add("             # ID           Name");
+		StateMod_Well well;
+		count = 0;
+		for (int i = 0; i < size; i++)
+		{
+			well = (StateMod_Well)data_Vector[i];
+			if (well.getGeoRecord() == null)
+			{
+				infoVector.Add("        " + StringUtil.formatString((i + 1),"%6d") + " " + StringUtil.formatString(well.getID(),"%-12.12s") + " " + well.getName());
+				++count;
+			}
+		}
+		infoVector.Add("        " + StringUtil.formatString(count,"%6d") + " Total missing");
+		infoVector.Add("");
+
+		infoVector.Add("OPERATIONAL RIGHTS:");
+		infoVector.Add("");
+		data_Vector = (System.Collections.IList)getComponentForComponentType(StateMod_DataSet.COMP_OPERATION_RIGHTS).getData();
+		size = data_Vector.Count;
+		infoVector.Add("Type Name                                                              Count");
+		// Figure out the maximum operational right number...
+		int ityopr_max = 0;
+		StateMod_OperationalRight opright = null;
+		for (int i = 0; i < size; i++)
+		{
+			opright = (StateMod_OperationalRight)data_Vector[i];
+			if (opright.getItyopr() > ityopr_max)
+			{
+				ityopr_max = opright.getItyopr();
+			}
+		}
+		IList<StateMod_OperationalRight_Metadata> oprMetadataList = StateMod_OperationalRight_Metadata.getAllMetadata();
+		int[] count2 = new int[oprMetadataList.Count + 1]; // Last item is for unknown types
+		// Now loop through all the rights and count the number by type...
+		for (int i = 0; i < count2.Length; i++)
+		{
+			count2[i] = 0;
+		}
+		for (int i = 0; i < size; i++)
+		{
+			opright = (StateMod_OperationalRight)data_Vector[i];
+			if (opright.getItyopr() <= (count2.Length - 1))
+			{
+				// Have a known right type
+				++count2[opright.getItyopr() - 1];
+			}
+			else
+			{
+				// Unknown right type
+				++count2[count2.Length - 1];
+			}
+		}
+		string name = null;
+		for (int i = 0; i < count2.Length; i++)
+		{
+			// Default for oprights not understood by the software
+			name = "Unknown right type (> type " + oprMetadataList.Count + ")";
+			if (i < oprMetadataList.Count)
+			{
+				name = oprMetadataList[i].getRightTypeName();
+			}
+			infoVector.Add(" " + StringUtil.formatString(i,"%2d") + "  " + StringUtil.formatString(name, "%-64.64s") + "  " + StringUtil.formatString(count2[i],"%4d"));
+		}
+		infoVector.Add("     Total                                                             " + StringUtil.formatString(size,"%4d"));
+		infoVector.Add("");
+
+		return infoVector;
+	}
+
+	// TODO - need to support other data set or file using the input name part of the TSID.
+	/// <summary>
+	/// Get the appropriate time series from a data set.  Only input time series
+	/// (actual and estimated) are processed.  If the time series does not exist in
+	/// memory, it is read from the input file if read_data is true. </summary>
+	/// <param name="tsident_string"> Time series identifier string, for example from the
+	/// StateMod GUI graphing tool or a time series product. </param>
+	/// <exception cref="if"> there is an error processing the time series identifier. </exception>
+//JAVA TO C# CONVERTER WARNING: Method 'throws' clauses are not available in .NET:
+//ORIGINAL LINE: public RTi.TS.TS getTimeSeries(String tsident_string, RTi.Util.Time.DateTime req_date1, RTi.Util.Time.DateTime req_date2, String req_units, boolean read_data) throws Exception
+	public virtual TS getTimeSeries(string tsident_string, DateTime req_date1, DateTime req_date2, string req_units, bool read_data)
+	{
+		string routine = "StateMod_DataSet.getTimeSeries";
+		TSIdent tsident = new TSIdent(tsident_string);
+		// The identifier in some cases cannot be used directly to find the
+		// time series of interest.  For example, "Demand" is used for several
+		// time series.  For now, hard code the lookups for the data types, in
+		// the order of the components.
+		string id = tsident.getLocation();
+		string datatype = tsident.getType();
+		string interval = tsident.getInterval();
+		DataSetComponent comp = null, comp2 = null;
+		System.Collections.IList data = null;
+		int pos = 0;
+		StateMod_StreamGage gage = null;
+		StateMod_StreamEstimate estimate = null;
+		StateMod_Diversion div = null;
+		StateMod_Reservoir res = null;
+		StateMod_InstreamFlow instream = null;
+		StateMod_Well well = null;
+		Message.printStatus(1, routine, "Getting time series for \"" + tsident_string + "\"");
+		string fn; // File name string
+		DateTime date1 = null, date2 = null;
+		if (req_date1 != null)
+		{
+			date1 = new DateTime(req_date1);
+		}
+		else
+		{
+			date1 = getDataStart();
+		}
+		if (req_date2 != null)
+		{
+			date2 = new DateTime(req_date2);
+		}
+		else
+		{
+			date1 = getDataEnd();
+		}
+		TS ts = null; // Used where a time series must be processed.
+
+		// The general order is by station type (StreamGage, Diversion,
+		// Reservoir, InstreamFlow, Well), with exceptions being that parameters
+		// shared between data types will be processed with the first station
+		// type that uses the data.  Use the lookup methods to request the data
+		// types to avoid hard-coded data types.  In some cases, the data types
+		// are know to be shared between station types - in these cases lists
+		// all the data types at the top, even though some will be exactly the
+		// same - in this way it is easier to see that all data types are accounted for.
+		if (datatype.Equals(lookupTimeSeriesDataType(COMP_STREAMGAGE_HISTORICAL_TS_MONTHLY), StringComparison.OrdinalIgnoreCase))
+		{
+			// Historical flow...
+			// Always a stream gage...
+			comp = getComponentForComponentType(COMP_STREAMGAGE_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				gage = (StateMod_StreamGage)data[pos];
+			}
+			// Stream gage data are always in memory...
+			if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+			{
+				return gage.getHistoricalMonthTS();
+			}
+			else if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+			{
+				return gage.getHistoricalDayTS();
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_STREAMGAGE_HISTORICAL_TS_DAILY) + __ESTIMATED, StringComparison.OrdinalIgnoreCase))
+		{
+			// Always a stream gage and daily...
+			comp = getComponentForComponentType(COMP_STREAMGAGE_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				gage = (StateMod_StreamGage)data[pos];
+			}
+			// Inputs are always in memory...
+			return StateMod_Util.createDailyEstimateTS(id, "Daily historical streamflow estimate", datatype, "CFS", gage.getCrunidy(), gage.getHistoricalMonthTS(), gage.getHistoricalDayTS());
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_STREAMGAGE_NATURAL_FLOW_TS_MONTHLY), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_STREAMGAGE_NATURAL_FLOW_TS_DAILY), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_MONTHLY), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_DAILY), StringComparison.OrdinalIgnoreCase))
+		{
+			// Could be a stream gage or estimated flow node.  Try the stream gage first...
+			comp = getComponentForComponentType(COMP_STREAMGAGE_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				gage = (StateMod_StreamGage)data[pos];
+				// Stream gage data are always in memory...
+				if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+				{
+					return gage.getBaseflowMonthTS();
+				}
+				else if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+				{
+					return gage.getBaseflowDayTS();
+				}
+			}
+			// If here then the stream gage did not have the data.  Try the stream estimate.
+			comp = getComponentForComponentType(COMP_STREAMESTIMATE_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				estimate = (StateMod_StreamEstimate)data[pos];
+				// Stream estimate data are always in memory...
+				if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+				{
+					return estimate.getBaseflowMonthTS();
+				}
+				else if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+				{
+					return estimate.getBaseflowMonthTS();
+				}
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_STREAMGAGE_NATURAL_FLOW_TS_DAILY) + __ESTIMATED, StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_DAILY) + __ESTIMATED, StringComparison.OrdinalIgnoreCase))
+		{
+			// Could be a stream gage or base flow node but always daily.
+			// Try the stream gage first...
+			comp = getComponentForComponentType(COMP_STREAMGAGE_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				gage = (StateMod_StreamGage)data[pos];
+				// Stream gage data are always in memory...
+				return StateMod_Util.createDailyEstimateTS(id, "Daily natural flow estimate", datatype, "CFS", gage.getCrunidy(), gage.getBaseflowMonthTS(), gage.getBaseflowDayTS());
+			}
+			// If here then the stream gage did not have the data...
+			comp = getComponentForComponentType(COMP_STREAMESTIMATE_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				estimate = (StateMod_StreamEstimate)data[pos];
+				// Stream estimate data are always in memory...
+				return StateMod_Util.createDailyEstimateTS(id,"Daily natural flow estimate", datatype, "CFS", estimate.getCrunidy(), estimate.getBaseflowMonthTS(), estimate.getBaseflowDayTS());
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_DIVERSION_TS_MONTHLY), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_DEMAND_TS_OVERRIDE_MONTHLY), StringComparison.OrdinalIgnoreCase))
+		{
+			// Always a diversion...
+			comp = getComponentForComponentType(COMP_DIVERSION_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				div = (StateMod_Diversion)data[pos];
+			}
+			// Diversion data might be in memory...
+			if (datatype.Equals(lookupTimeSeriesDataType(COMP_DIVERSION_TS_MONTHLY), StringComparison.OrdinalIgnoreCase) && interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+			{
+				ts = div.getDiversionMonthTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// Time series is not in memory so try reading from the data file...
+					comp2 = getComponentForComponentType(COMP_DIVERSION_TS_MONTHLY);
+					fn = getDataFilePathAbsolute(comp2.getDataFileName());
+					try
+					{
+						ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null, true);
+						ts.setDataType(lookupTimeSeriesDataType(COMP_DIVERSION_TS_MONTHLY));
+					}
+					catch (Exception)
+					{
+						ts = null;
+					}
+				}
+				return ts;
+			}
+			else if (datatype.Equals(lookupTimeSeriesDataType(COMP_DIVERSION_TS_DAILY), StringComparison.OrdinalIgnoreCase) && interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+			{
+				ts = div.getDiversionDayTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// Time series is not in memory so try reading from the data file...
+					comp2 = getComponentForComponentType(COMP_DIVERSION_TS_DAILY);
+					fn = getDataFilePathAbsolute(comp2.getDataFileName());
+					try
+					{
+						ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null, true);
+						ts.setDataType(lookupTimeSeriesDataType(COMP_DIVERSION_TS_DAILY));
+					}
+					catch (Exception)
+					{
+						ts = null;
+					}
+				}
+				return ts;
+			}
+			else if (datatype.Equals(lookupTimeSeriesDataType(COMP_DEMAND_TS_OVERRIDE_MONTHLY), StringComparison.OrdinalIgnoreCase))
+			{
+				ts = div.getDemandOverrideMonthTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// Time series is not in memory so try reading from the data file...
+					comp2 = getComponentForComponentType(COMP_DEMAND_TS_OVERRIDE_MONTHLY);
+					fn = getDataFilePathAbsolute(comp2.getDataFileName());
+					try
+					{
+						ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null, true);
+						ts.setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_OVERRIDE_MONTHLY));
+					}
+					catch (Exception)
+					{
+						ts = null;
+					}
+				}
+				return ts;
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_DEMAND_TS_MONTHLY), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_DEMAND_TS_DAILY), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_MONTHLY), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_DAILY), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_WELL_DEMAND_TS_MONTHLY), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_WELL_DEMAND_TS_DAILY), StringComparison.OrdinalIgnoreCase))
+		{
+			// May be a diversion, instream flow, or well...
+			comp = getComponentForComponentType(COMP_DIVERSION_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				div = (StateMod_Diversion)data[pos];
+				// Diversion data might be in memory...
+				if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = div.getDemandMonthTS();
+					if ((ts == null) && !areTSRead() && read_data)
+					{
+						// Time series is not in memory so try reading from the data file...
+						comp2 = getComponentForComponentType(COMP_DEMAND_TS_MONTHLY);
+						fn = getDataFilePathAbsolute(comp2.getDataFileName());
+						try
+						{
+							ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null,true);
+							ts.setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_MONTHLY));
+						}
+						catch (Exception)
+						{
+							ts = null;
+						}
+					}
+					return ts;
+				}
+				else if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = div.getDemandDayTS();
+					if ((ts == null) && !areTSRead() && read_data)
+					{
+						// Time series is not in memory so try reading from the data file...
+						comp2 = getComponentForComponentType(COMP_DEMAND_TS_DAILY);
+						fn = getDataFilePathAbsolute(comp2.getDataFileName());
+						try
+						{
+							ts = StateMod_TS.readTimeSeries(tsident_string, fn,null, null, null,true);
+							ts.setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_DAILY));
+						}
+						catch (Exception)
+						{
+							ts = null;
+						}
+					}
+					return ts;
+				}
+			}
+			// If here, did not find a matching diversion so try the instream flow stations...
+			comp = getComponentForComponentType(COMP_INSTREAM_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				instream = (StateMod_InstreamFlow)data[pos];
+				// Instream flow data might be in memory...
+				if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = instream.getDemandMonthTS();
+					if ((ts == null) && !areTSRead() && read_data)
+					{
+						// Time series is not in memory so try reading from the data file...
+						comp2 = getComponentForComponentType(COMP_INSTREAM_DEMAND_TS_MONTHLY);
+						fn = getDataFilePathAbsolute(comp2.getDataFileName());
+						try
+						{
+							ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null,true);
+							ts.setDataType(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_MONTHLY));
+						}
+						catch (Exception)
+						{
+							ts = null;
+						}
+					}
+					return ts;
+				}
+				else if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = instream.getDemandDayTS();
+					if ((ts == null) && !areTSRead() && read_data)
+					{
+						// Time series is not in memory so try reading from the data file...
+						comp2 = getComponentForComponentType(COMP_INSTREAM_DEMAND_TS_DAILY);
+						fn = getDataFilePathAbsolute(comp2.getDataFileName());
+						try
+						{
+							ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null,true);
+							ts.setDataType(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_DAILY));
+						}
+						catch (Exception)
+						{
+							ts = null;
+						}
+					}
+					return ts;
+				}
+			}
+			// If here, did not find a matching instream flow so try the well stations...
+			comp = getComponentForComponentType(COMP_WELL_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				well = (StateMod_Well)data[pos];
+				// Well data might be in memory...
+				if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = well.getDemandMonthTS();
+					if ((ts == null) && !areTSRead() && read_data)
+					{
+						// Time series is not in memory so try reading from the data file...
+						comp2 = getComponentForComponentType(COMP_WELL_DEMAND_TS_MONTHLY);
+						fn = getDataFilePathAbsolute(comp2.getDataFileName());
+						try
+						{
+							ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null,true);
+							ts.setDataType(lookupTimeSeriesDataType(COMP_WELL_DEMAND_TS_MONTHLY));
+						}
+						catch (Exception)
+						{
+							ts = null;
+						}
+					}
+					return ts;
+				}
+				else if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = well.getDemandDayTS();
+					if ((ts == null) && !areTSRead() && read_data)
+					{
+						// Time series is not in memory so try reading from the data file...
+						comp2 = getComponentForComponentType(COMP_WELL_DEMAND_TS_DAILY);
+						fn = getDataFilePathAbsolute(comp2.getDataFileName());
+						try
+						{
+							ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null,true);
+							ts.setDataType(lookupTimeSeriesDataType(COMP_WELL_DEMAND_TS_DAILY));
+						}
+						catch (Exception)
+						{
+							ts = null;
+						}
+					}
+					return ts;
+				}
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_DEMAND_TS_AVERAGE_MONTHLY), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_AVERAGE_MONTHLY), StringComparison.OrdinalIgnoreCase))
+		{
+			// May be a diversion or instream flow...
+			comp = getComponentForComponentType(COMP_DIVERSION_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				div = (StateMod_Diversion)data[pos];
+				// Diversion data might be in memory...
+				ts = div.getDemandAverageMonthTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// Time series is not in memory so try reading from the data file...
+					comp2 = getComponentForComponentType(COMP_DEMAND_TS_AVERAGE_MONTHLY);
+					fn = getDataFilePathAbsolute(comp2.getDataFileName());
+					try
+					{
+						ts = StateMod_Util.createRepeatingAverageMonthTS(StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null,true), date1, date2);
+						ts.setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_AVERAGE_MONTHLY));
+					}
+					catch (Exception)
+					{
+						ts = null;
+					}
+				}
+				return ts;
+			}
+			// If get to here, a diversion was not matched so try the instream flows...
+			comp = getComponentForComponentType(COMP_INSTREAM_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				instream = (StateMod_InstreamFlow)data[pos];
+				// Instream flow data might be in memory...
+				ts = instream.getDemandAverageMonthTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// Time series is not in memory so try reading from the data file...
+					comp2 = getComponentForComponentType(COMP_INSTREAM_DEMAND_TS_AVERAGE_MONTHLY);
+					fn = getDataFilePathAbsolute(comp2.getDataFileName());
+					try
+					{
+						ts = StateMod_Util.createRepeatingAverageMonthTS(StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null,true), date1, date2);
+						ts.setDataType(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_AVERAGE_MONTHLY));
+					}
+					catch (Exception)
+					{
+						ts = null;
+					}
+				}
+				return ts;
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY), StringComparison.OrdinalIgnoreCase))
+		{
+			// May be a diversion or well...
+			comp = getComponentForComponentType(COMP_DIVERSION_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				div = (StateMod_Diversion)data[pos];
+				// Diversion data might be in memory...
+				if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = div.getConsumptiveWaterRequirementMonthTS();
+					if ((ts == null) && !areTSRead() && read_data)
+					{
+						// Time series is not in memory so try reading from the data file...
+						comp2 = getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY);
+						fn = getDataFilePathAbsolute(comp2.getDataFileName());
+						try
+						{
+							ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null,true);
+							ts.setDataType(lookupTimeSeriesDataType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY));
+						}
+						catch (Exception)
+						{
+							ts = null;
+						}
+					}
+					return ts;
+				}
+				else if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = div.getConsumptiveWaterRequirementDayTS();
+					if ((ts == null) && !areTSRead() && read_data)
+					{
+						// Time series is not in memory so try reading from the data file...
+						comp2 = getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY);
+						fn = getDataFilePathAbsolute(comp2.getDataFileName());
+						try
+						{
+							ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null,true);
+							ts.setDataType(lookupTimeSeriesDataType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY));
+						}
+						catch (Exception)
+						{
+							ts = null;
+						}
+					}
+					return ts;
+				}
+			}
+			// If here, did not find a matching instream flow so try the well stations...
+			comp = getComponentForComponentType(COMP_WELL_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				well = (StateMod_Well)data[pos];
+				// Well data might be in memory...
+				if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = well.getConsumptiveWaterRequirementMonthTS();
+					if ((ts == null) && !areTSRead() && read_data)
+					{
+						// Time series is not in memory so try reading from the data file...
+						comp2 = getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY);
+						fn = getDataFilePathAbsolute(comp2.getDataFileName());
+						try
+						{
+							ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null,true);
+							ts.setDataType(lookupTimeSeriesDataType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY));
+						}
+						catch (Exception)
+						{
+							ts = null;
+						}
+					}
+					return ts;
+				}
+				else if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = well.getConsumptiveWaterRequirementDayTS();
+					if ((ts == null) && !areTSRead() && read_data)
+					{
+						// Time series is not in memory so try reading from the data file...
+						comp2 = getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY);
+						fn = getDataFilePathAbsolute(comp2.getDataFileName());
+						try
+						{
+							ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null,true);
+							ts.setDataType(lookupTimeSeriesDataType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY));
+						}
+						catch (Exception)
+						{
+							ts = null;
+						}
+					}
+					return ts;
+				}
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY) + __ESTIMATED, StringComparison.OrdinalIgnoreCase))
+		{
+			// Always diversion or well...
+			comp = getComponentForComponentType(COMP_DIVERSION_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				div = (StateMod_Diversion)data[pos];
+				return StateMod_Util.createDailyEstimateTS(id, "Daily CWR, estimated", datatype, lookupTimeSeriesDataUnits(StateMod_DataSet.COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY), div.getCdividy(), div.getConsumptiveWaterRequirementMonthTS(), div.getConsumptiveWaterRequirementDayTS());
+			}
+			// If here, no diversion was found, so try well...
+			comp = getComponentForComponentType(COMP_WELL_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				well = (StateMod_Well)data[pos];
+				return StateMod_Util.createDailyEstimateTS(id, "Daily CWR, estimated", datatype, lookupTimeSeriesDataUnits(StateMod_DataSet.COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY), well.getCdividyw(), well.getConsumptiveWaterRequirementMonthTS(), well.getConsumptiveWaterRequirementDayTS());
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_DIVERSION_RIGHTS), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_RESERVOIR_RIGHTS), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_INSTREAM_RIGHTS), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_WELL_RIGHTS), StringComparison.OrdinalIgnoreCase))
+		{
+			// Water rights.
+			// May be a diversion, instream flow, reservoir, or well...
+			// Figure out which one and then create a time series...
+			comp = getComponentForComponentType(COMP_DIVERSION_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				div = (StateMod_Diversion)data[pos];
+				if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = StateMod_Util.createWaterRightTS(div, TimeInterval.MONTH, lookupTimeSeriesDataUnits(StateMod_DataSet.COMP_DIVERSION_TS_MONTHLY), getDataStart(), getDataEnd());
+					return ts;
+				}
+				else if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = StateMod_Util.createWaterRightTS(div, TimeInterval.DAY, lookupTimeSeriesDataUnits(StateMod_DataSet.COMP_DIVERSION_TS_DAILY), getDataStart(), getDataEnd());
+					return ts;
+				}
+			}
+			// If here, did not find a matching diversion so try the instream flow stations...
+			comp = getComponentForComponentType(COMP_INSTREAM_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				instream = (StateMod_InstreamFlow)data[pos];
+				if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = StateMod_Util.createWaterRightTS(instream, TimeInterval.MONTH, lookupTimeSeriesDataUnits(StateMod_DataSet.COMP_INSTREAM_DEMAND_TS_MONTHLY), getDataStart(), getDataEnd());
+					return ts;
+				}
+				else if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = StateMod_Util.createWaterRightTS(instream, TimeInterval.DAY, lookupTimeSeriesDataUnits(StateMod_DataSet.COMP_INSTREAM_DEMAND_TS_DAILY), getDataStart(), getDataEnd());
+					return ts;
+				}
+			}
+			// If here, did not find a matching diversion so try the reservoir stations...
+			comp = getComponentForComponentType(COMP_RESERVOIR_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				res = (StateMod_Reservoir)data[pos];
+				if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = StateMod_Util.createWaterRightTS(res, TimeInterval.MONTH, lookupTimeSeriesDataUnits(StateMod_DataSet.COMP_RESERVOIR_CONTENT_TS_MONTHLY), getDataStart(), getDataEnd());
+					return ts;
+				}
+				else if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = StateMod_Util.createWaterRightTS(res, TimeInterval.DAY, lookupTimeSeriesDataUnits(StateMod_DataSet.COMP_RESERVOIR_CONTENT_TS_MONTHLY), getDataStart(), getDataEnd());
+					return ts;
+				}
+			}
+			// If here, did not find a matching instream flow so try the well stations...
+			comp = getComponentForComponentType(COMP_WELL_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				well = (StateMod_Well)data[pos];
+				// Get the units from the diversion time series...
+				if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = StateMod_Util.createWaterRightTS(well, TimeInterval.MONTH, lookupTimeSeriesDataUnits(StateMod_DataSet.COMP_DIVERSION_TS_MONTHLY), getDataStart(), getDataEnd());
+					return ts;
+				}
+				else if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+				{
+					ts = StateMod_Util.createWaterRightTS(res, TimeInterval.DAY, lookupTimeSeriesDataUnits(StateMod_DataSet.COMP_DIVERSION_TS_DAILY), getDataStart(), getDataEnd());
+					return ts;
+				}
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_RESERVOIR_CONTENT_TS_MONTHLY), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_RESERVOIR_CONTENT_TS_DAILY), StringComparison.OrdinalIgnoreCase))
+		{
+			// Always a reservoir...
+			comp = getComponentForComponentType(COMP_RESERVOIR_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				res = (StateMod_Reservoir)data[pos];
+			}
+			// Reservoir data might be in memory...
+			if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+			{
+				ts = res.getContentMonthTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// Time series is not in memory so try reading from the data file...
+					comp2 = getComponentForComponentType(COMP_RESERVOIR_CONTENT_TS_MONTHLY);
+					fn = getDataFilePathAbsolute(comp2.getDataFileName());
+					try
+					{
+						ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null, true);
+						ts.setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_CONTENT_TS_MONTHLY));
+					}
+					catch (Exception)
+					{
+						ts = null;
+					}
+				}
+				return ts;
+			}
+			if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+			{
+				ts = res.getContentDayTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// Time series is not in memory so try reading from the data file...
+					comp2 = getComponentForComponentType(COMP_RESERVOIR_CONTENT_TS_DAILY);
+					fn = getDataFilePathAbsolute(comp2.getDataFileName());
+					try
+					{
+						ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null, true);
+						ts.setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_CONTENT_TS_DAILY));
+					}
+					catch (Exception)
+					{
+						ts = null;
+					}
+				}
+				return ts;
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_MONTHLY) + "Min", StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_DAILY) + "Min", StringComparison.OrdinalIgnoreCase))
+		{
+			// Always a reservoir...
+			comp = getComponentForComponentType(COMP_RESERVOIR_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				res = (StateMod_Reservoir)data[pos];
+			}
+			// Reservoir data might be in memory...
+			if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+			{
+				ts = res.getMinTargetMonthTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// Time series is not in memory so try reading from the data file.  Target minimum should
+					// be found before the maximum...
+					comp2 = getComponentForComponentType(COMP_RESERVOIR_TARGET_TS_MONTHLY);
+					fn = getDataFilePathAbsolute(comp2.getDataFileName());
+					try
+					{
+						ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null, true);
+						ts.setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_MONTHLY) + "Min");
+					}
+					catch (Exception)
+					{
+						ts = null;
+					}
+				}
+				return ts;
+			}
+			if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+			{
+				ts = res.getMinTargetDayTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// Time series is not in memory so try reading from the data file...
+					comp2 = getComponentForComponentType(COMP_RESERVOIR_TARGET_TS_DAILY);
+					fn = getDataFilePathAbsolute(comp2.getDataFileName());
+					try
+					{
+						ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null, true);
+						ts.setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_DAILY) + "Min");
+					}
+					catch (Exception)
+					{
+						ts = null;
+					}
+				}
+				return ts;
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_MONTHLY) + "Max", StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_DAILY) + "Max", StringComparison.OrdinalIgnoreCase))
+		{
+			// Always a reservoir...
+			comp = getComponentForComponentType(COMP_RESERVOIR_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				res = (StateMod_Reservoir)data[pos];
+			}
+			// Reservoir data might be in memory...
+			if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+			{
+				ts = res.getMaxTargetMonthTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// TODO - need to read 2nd time series in
+					// pair - code does not handle because it will find the first time series.
+				}
+				return ts;
+			}
+			if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+			{
+				ts = res.getMaxTargetDayTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// TODO - need to read 2nd time series in
+					// pair - code does not handle because it will find the first time series.
+				}
+				return ts;
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_RESERVOIR_CONTENT_TS_DAILY) + __ESTIMATED, StringComparison.OrdinalIgnoreCase))
+		{
+			comp = getComponentForComponentType(COMP_RESERVOIR_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				res = (StateMod_Reservoir)data[pos];
+				// Try to get the estimated time series...
+				return StateMod_Util.createDailyEstimateTS(id, "End of day content, estimated", datatype, "ACFT", res.getCresdy(), res.getContentMonthTS(), res.getContentDayTS());
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_WELL_PUMPING_TS_MONTHLY), StringComparison.OrdinalIgnoreCase) || datatype.Equals(lookupTimeSeriesDataType(COMP_WELL_PUMPING_TS_DAILY), StringComparison.OrdinalIgnoreCase))
+		{
+			// Always a well...
+			comp = getComponentForComponentType(COMP_WELL_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				well = (StateMod_Well)data[pos];
+			}
+			// Well data might be in memory...
+			if (interval.Equals("Month", StringComparison.OrdinalIgnoreCase))
+			{
+				ts = well.getPumpingMonthTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// Time series is not in memory so try reading from the data file...
+					comp2 = getComponentForComponentType(COMP_WELL_PUMPING_TS_MONTHLY);
+					fn = getDataFilePathAbsolute(comp2.getDataFileName());
+					try
+					{
+						ts = StateMod_TS.readTimeSeries(tsident_string, fn,null, null, null, true);
+						ts.setDataType(lookupTimeSeriesDataType(COMP_WELL_PUMPING_TS_MONTHLY));
+					}
+					catch (Exception)
+					{
+						ts = null;
+					}
+				}
+				return ts;
+			}
+			if (interval.Equals("Day", StringComparison.OrdinalIgnoreCase))
+			{
+				ts = well.getPumpingDayTS();
+				if ((ts == null) && !areTSRead() && read_data)
+				{
+					// Time series is not in memory so try reading from the data file...
+					comp2 = getComponentForComponentType(COMP_WELL_PUMPING_TS_DAILY);
+					fn = getDataFilePathAbsolute(comp2.getDataFileName());
+					try
+					{
+						ts = StateMod_TS.readTimeSeries(tsident_string, fn, null, null, null, true);
+						ts.setDataType(lookupTimeSeriesDataType(COMP_WELL_PUMPING_TS_DAILY));
+					}
+					catch (Exception)
+					{
+						ts = null;
+					}
+				}
+				return ts;
+			}
+		}
+		else if (datatype.Equals(lookupTimeSeriesDataType(COMP_WELL_PUMPING_TS_DAILY) + __ESTIMATED, StringComparison.OrdinalIgnoreCase))
+		{
+			comp = getComponentForComponentType(COMP_WELL_STATIONS);
+			data = (System.Collections.IList)comp.getData();
+			pos = StateMod_Util.IndexOf(data, id);
+			if (pos >= 0)
+			{
+				well = (StateMod_Well)data[pos];
+				// Try to get the estimated time series...
+				return StateMod_Util.createDailyEstimateTS(id, "Well pumping, historical, estimated", datatype, lookupTimeSeriesDataUnits(StateMod_DataSet.COMP_WELL_PUMPING_TS_DAILY), well.getCdividyw(), well.getPumpingMonthTS(), well.getPumpingDayTS());
+			}
+		}
+
+		// Default is to return null...
+		return null;
+	}
+
+	/// <summary>
+	/// Return the list of unhandled response file properties.  These are entries in the *rsp file that the code
+	/// does not specifically handle, such as new files or uninplemented files. </summary>
+	/// <returns> properties from the response file that are not explicitly handled </returns>
+	public virtual PropList getUnhandledResponseFileProperties()
+	{
+		return __unhandledResponseFileProperties;
+	}
+
+	/// <summary>
+	/// Return a list of String containing information about unused data in the data set.  For example,
+	/// these may be evaporation time series or delay tables that are not used.
+	/// </summary>
+	public virtual IList<string> getUnusedDataSummary()
+	{
+		System.Collections.IList v = new List<object>();
+
+		v.Add("Summary of data objects that are not used in the data set");
+		v.Add("");
+
+		DataSetComponent comp1, comp2;
+		System.Collections.IList data1, data2;
+		int size1, size2, size3;
+		TS ts;
+
+		// Stream gage...
+
+		v.Add("");
+		v.Add("Stream Gage Data are not checked.");
+		v.Add("");
+
+		// Delay Table (Monthly)...
+
+		v.Add("");
+		v.Add("Delay Tables (Monthly) are not checked.");
+		v.Add("");
+
+		// Delay Table (Daily)...
+
+		v.Add("");
+		v.Add("Delay Tables (Daily) are not checked.");
+		v.Add("");
+
+		// Diversions...
+
+		v.Add("");
+		v.Add("Diversion data are not checked.");
+		v.Add("");
+
+		// Precipitation time series (monthly)...
+
+		comp1 = getComponentForComponentType(COMP_PRECIPITATION_TS_MONTHLY);
+		if (comp1.hasData())
+		{
+			v.Add(comp1.getComponentName());
+			v.Add("");
+			v.Add("Precip TS ID   Precip TS Name");
+			v.Add("-----------------------------------------");
+			data1 = (System.Collections.IList)comp1.getData();
+			size1 = data1.Count;
+			string id;
+			bool found = false;
+			for (int i = 0; i < size1; i++)
+			{
+				found = false;
+				ts = (TS)data1[i];
+				id = ts.getLocation();
+				StateMod_Reservoir res;
+				comp2 = getComponentForComponentType(StateMod_DataSet.COMP_RESERVOIR_STATIONS);
+				data2 = (System.Collections.IList)comp2.getData();
+				size2 = data2.Count;
+				System.Collections.IList climates;
+				StateMod_ReservoirClimate climate;
+				for (int j = 0; j < size2; j++)
+				{
+					res = (StateMod_Reservoir)data2[j];
+					climates = res.getClimates();
+					size3 = climates.Count;
+					for (int k = 0; k < size3; k++)
+					{
+						climate = (StateMod_ReservoirClimate)climates[k];
+						if ((climate.getType() == StateMod_ReservoirClimate.CLIMATE_PTPX) && climate.getID().Equals(id, StringComparison.OrdinalIgnoreCase))
+						{
+							// Found a reservoir that uses the station...
+							found = true;
+							break;
+						}
+					}
+				}
+				if (!found)
+				{
+					// The precipitation station is not used in the data set so print...
+					v.Add(StringUtil.formatString(id,"%-12.12s") + "  " + StringUtil.formatString(ts.getDescription(), "%-24.24s"));
+				}
+			}
+		} // End if comp1.hasData()
+
+		// Evaporation time series (monthly)...
+
+		comp1 = getComponentForComponentType(COMP_EVAPORATION_TS_MONTHLY);
+		if (comp1.hasData())
+		{
+			v.Add("");
+			v.Add(comp1.getComponentName());
+			v.Add("");
+			v.Add("Evap TS ID    Evap TS Name");
+			v.Add("-----------------------------------------");
+			data1 = (System.Collections.IList)comp1.getData();
+			size1 = data1.Count;
+			string id;
+			bool found = false;
+			for (int i = 0; i < size1; i++)
+			{
+				found = false;
+				ts = (TS)data1[i];
+				id = ts.getLocation();
+				StateMod_Reservoir res;
+				comp2 = getComponentForComponentType(StateMod_DataSet.COMP_RESERVOIR_STATIONS);
+				data2 = (System.Collections.IList)comp2.getData();
+				size2 = data2.Count;
+				System.Collections.IList climates;
+				StateMod_ReservoirClimate climate;
+				for (int j = 0; j < size2; j++)
+				{
+					res = (StateMod_Reservoir)data2[j];
+					climates = res.getClimates();
+					size3 = climates.Count;
+					for (int k = 0; k < size3; k++)
+					{
+						climate = (StateMod_ReservoirClimate)climates[k];
+						if ((climate.getType() == StateMod_ReservoirClimate.CLIMATE_EVAP) && climate.getID().Equals(id, StringComparison.OrdinalIgnoreCase))
+						{
+							// Found a reservoir that uses the station...
+							found = true;
+							break;
+						}
+					}
+				}
+				if (!found)
+				{
+					// The evaporation station is not used in the data set so print...
+					v.Add(StringUtil.formatString(id,"%-12.12s") + "  " + StringUtil.formatString(ts.getDescription(), "%-24.24s"));
+				}
+			}
+		} // End if comp1.hasData()
+
+		// Reservoirs...
+
+		v.Add("");
+		v.Add("Reservoirs are not checked.");
+		v.Add("");
+
+		// Instream flows...
+
+		v.Add("");
+		v.Add("Instream flows are not checked.");
+		v.Add("");
+
+		// Wells...
+
+		v.Add("");
+		v.Add("Wells are not checked.");
+		v.Add("");
+
+		// Stream Estimate stations...
+
+		v.Add("");
+		v.Add("Stream estimate stations are not checked.");
+		v.Add("");
+
+		// River network...
+
+		v.Add("");
+		v.Add("River network data are not checked.");
+		v.Add("");
+
+		// Operational rights.
+
+		v.Add("");
+		v.Add("Operational rights data are not checked.");
+		v.Add("");
+
+		return v;
+	}
+
+	/// <summary>
+	/// Indicate whether the data set has daily data (iday not missing and iday not equal to 0).
+	/// Use this method instead of checking iday directly to simplify logic and allow
+	/// for future changes to the model input. </summary>
+	/// <returns> true if the data set includes daily data (iday not missing and
+	/// iday != 0).  Return false if daily data are not used. </returns>
+	/// <param name="is_active"> Only return true if daily data are included in the data set and
+	/// the data are active (iday = 1). </param>
+	public virtual bool hasDailyData(bool is_active)
+	{
+		if (is_active)
+		{
+			if (__iday == 1)
+			{
+				// Daily data are included in the data set and are used...
+				return true;
+			}
+			else
+			{
+				// Daily data may or may not be included in the data set but are not used...
+				return false;
+			}
+		}
+		else if (!StateMod_Util.isMissing(__iday) && (__iday != 0))
+		{
+			// Data are specified in the data set but are not used...
+			return true;
+		}
+		else
+		{
+			// Daily data are not included...
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// Indicate whether the data set has irrigation practice data for
+	/// variable efficiency (itsfile not missing and itsfile not equal to 0).
+	/// Use this method instead of checking itsfile directly to simplify logic and allow
+	/// for future changes to the model input. </summary>
+	/// <returns> true if the data set includes irrigation practice data (itsfile not
+	/// missing and itsfile != 0).  Return false if irrigation practice data are not used. </returns>
+	/// <param name="is_active"> Only return true if irrigation practice data are included in
+	/// the data set and the data are active (itsfile = 1). </param>
+	public virtual bool hasIrrigationPracticeData(bool is_active)
+	{
+		if (is_active)
+		{
+			if (__itsfile == 1)
+			{
+				// Irrigation practice data are included in the data set and are used...
+				return true;
+			}
+			else
+			{
+				// Irrigtaion practice data may or may not be included in the data set but are not used...
+				return false;
+			}
+		}
+		else if (!StateMod_Util.isMissing(__itsfile) && (__itsfile != 0))
+		{
+			// Data are specified in the data set but are not used...
+			return true;
+		}
+		else
+		{
+			// Irrigation practice data are not included...
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// Indicate whether the data set has Irrigation Water Requirement (IWR) data for
+	/// variable efficiency (ieffmax not missing and ieffmax not equal to 0).
+	/// Use this method instead of checking ieffmax directly to simplify logic and allow
+	/// for future changes to the model input. </summary>
+	/// <returns> true if the data set includes IWR data (ieffmax not missing and
+	/// ieffmax != 0).  Return false if IWR data are not used. </returns>
+	/// <param name="is_active"> Only return true if IWR data are included in the data set and
+	/// the data are active (ieffmax = 1). </param>
+	public virtual bool hasIrrigationWaterRequirementData(bool is_active)
+	{
+		if (is_active)
+		{
+			if (__ieffmax == 1)
+			{
+				// IWR data are included in the data set and are used...
+				return true;
+			}
+			else
+			{
+				// IWR data may or may not be included in the data set but are not used...
+				return false;
+			}
+		}
+		else if (!StateMod_Util.isMissing(__ieffmax) && (__ieffmax != 0))
+		{
+			// Data are specified in the data set but are not used...
+			return true;
+		}
+		else
+		{
+			// IWR data are not included...
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// Indicate whether the data set has monthly instream flow data.
+	/// Use this method instead of checking ireach directly to simplify logic and allow
+	/// for future changes to the model input. </summary>
+	/// <returns> true if the data set includes monthly instream flow demand data
+	/// (ireach == 2 or ireach == 3).  Return false if monthly instream flow demands are not used. </returns>
+	public virtual bool hasMonthlyISFData()
+	{
+		if ((__ireach == 2) || (__ireach == 3))
+		{
+			// Monthly instream flow demand data are included in the data set and are used...
+			return true;
+		}
+		else
+		{
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// Indicate whether the data set has San Juan Recovery data (isjrip not missing and isjrip not equal 0).
+	/// Use this method instead of checking isjrip directly to simplify logic and allow
+	/// for future changes to the model input. </summary>
+	/// <returns> true if the data set includes San Juan Recovery data (isjrip not missing
+	/// and isjrip != 0).  Return false if San Juan Recovery data are not used. </returns>
+	/// <param name="is_active"> Only return true if San Juan Recovery data are included in the
+	/// data set and the data are active (isjrip = 1). </param>
+	public virtual bool hasSanJuanData(bool is_active)
+	{
+		if (is_active)
+		{
+			if (__isjrip == 1)
+			{
+				// San Juan Recovery data are included in the data set and are used...
+				return true;
+			}
+			else
+			{
+				// San Juan Revovery data may or may not be included in the data set but are not used...
+				return false;
+			}
+		}
+		else if (!StateMod_Util.isMissing(__isjrip) && (__isjrip != 0))
+		{
+			// Data are specified in the data set but are not used...
+			return true;
+		}
+		else
+		{
+			// San Juan Recovery data are not included...
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// Indicate whether the data set has soil moisture data (soild not missing and soild not equal to 0).
+	/// Use this method instead of checking soild directly to simplify logic and allow
+	/// for future changes to the model input. </summary>
+	/// <returns> true if the data set includes soil moisture data (soild not missing
+	/// and soild != 0).  Return false if soil moisture data are not used. </returns>
+	/// <param name="is_active"> Only return true if soil moisture data are included in the
+	/// data set and the data are active (soild = 1). </param>
+	public virtual bool hasSoilMoistureData(bool is_active)
+	{
+		if (is_active)
+		{
+			if (__soild > 0.0)
+			{
+				// Soil moisture data are included in the data set and are used...
+				return true;
+			}
+			else
+			{
+				// Soil moisture data may or may not be included in the data set but are not used...
+				return false;
+			}
+		}
+		else if (!StateMod_Util.isMissing(__soild) && (__soild != 0.0))
+		{
+			// Data are specified in the data set but are not used...
+			return true;
+		}
+		else
+		{
+			// Soil moisture data are not included...
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// Indicate whether the data set has well data (iwell not missing and iwell not equal to 0).
+	/// Use this method instead of checking iwell directly to simplify logic and allow
+	/// for future changes to the model input. </summary>
+	/// <returns> true if the data set includes well data (iwell not missing and
+	/// iwell != 0).  Return false if well data are not used. </returns>
+	/// <param name="is_active"> Only return true if well data are included in the data set and
+	/// the data are active (iwell = 1). </param>
+	public virtual bool hasWellData(bool is_active)
+	{
+		if (is_active)
+		{
+			if (__iwell == 1)
+			{
+				// Well data are included in the data set and are used...
+				return true;
+			}
+			else
+			{
+				// Well data may or may not be included in the data set but are not used...
+				return false;
+			}
+		}
+		else if (!StateMod_Util.isMissing(__iwell) && (__iwell != 0))
+		{
+			// Data are specified in the data set but are not used...
+			return true;
+		}
+		else
+		{
+			// Well data are not included...
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// Initialize a data set by defining all the components for the data set.  This
+	/// ensures that software will be able to evaluate all components.  Nulls are avoided where possible for
+	/// data (e.g., empty lists are assigned).  Also initialize the control data to reasonable values.
+	/// </summary>
+	private void initialize()
+	{
+		string routine = "StateMod_DataSet.initialize";
+		// Initialize the control data
+		initializeControlData();
+		// Always add all the components to the data set because StateMod does
+		// not really differentiate between data set types.  Instead, control
+		// file information controls.  Components are added to their groups.
+		// Also initialize the data for each sub-component to empty Vectors so
+		// that GUI based code does not need to check for nulls.  This is
+		// consistent with StateMod GUI initializing data vectors to empty at startup.
+		//
+		// TODO - need to turn on data set components (set visible, etc.) as
+		// the control file is changed.  This allows new components to be enabled in the right order.
+		//
+		// TODO - should be allowed to have null data Vector but apparently
+		// StateMod GUI cannot handle yet - need to allow null later and use
+		// hasData() or similar to check.
+
+		DataSetComponent comp, subcomp;
+		try
+		{
+			comp = new DataSetComponent(this, COMP_CONTROL_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this, COMP_RESPONSE);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_CONTROL);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_OUTPUT_REQUEST);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_REACH_DATA);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this, COMP_CONSUMPTIVE_USE_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this, COMP_STATECU_STRUCTURE);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_IRRIGATION_PRACTICE_TS_YEARLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this, COMP_STREAMGAGE_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this, COMP_STREAMGAGE_STATIONS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_STREAMGAGE_HISTORICAL_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_STREAMGAGE_HISTORICAL_TS_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_STREAMGAGE_NATURAL_FLOW_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_STREAMGAGE_NATURAL_FLOW_TS_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this,COMP_DELAY_TABLE_MONTHLY_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this, COMP_DELAY_TABLES_MONTHLY);
+			subcomp.setData(new List<object>());
+
+			comp = new DataSetComponent(this, COMP_DELAY_TABLE_DAILY_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_DELAY_TABLES_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this, COMP_DIVERSION_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this, COMP_DIVERSION_STATIONS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_DIVERSION_RIGHTS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this,COMP_DIVERSION_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_DIVERSION_TS_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_DEMAND_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_DEMAND_TS_OVERRIDE_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_DEMAND_TS_AVERAGE_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_DEMAND_TS_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this, COMP_PRECIPITATION_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this, COMP_PRECIPITATION_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_PRECIPITATION_TS_YEARLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this, COMP_EVAPORATION_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this,COMP_EVAPORATION_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this,COMP_EVAPORATION_TS_YEARLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this, COMP_RESERVOIR_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this, COMP_RESERVOIR_STATIONS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this,COMP_RESERVOIR_RIGHTS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_RESERVOIR_CONTENT_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_RESERVOIR_CONTENT_TS_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_RESERVOIR_TARGET_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_RESERVOIR_TARGET_TS_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_RESERVOIR_RETURN);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this, COMP_INSTREAM_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this, COMP_INSTREAM_STATIONS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_INSTREAM_RIGHTS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_INSTREAM_DEMAND_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_INSTREAM_DEMAND_TS_AVERAGE_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_INSTREAM_DEMAND_TS_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this, COMP_WELL_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this, COMP_WELL_STATIONS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_WELL_RIGHTS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this,COMP_WELL_PUMPING_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this,COMP_WELL_PUMPING_TS_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this,COMP_WELL_DEMAND_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_WELL_DEMAND_TS_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this, COMP_PLAN_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this, COMP_PLANS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_PLAN_WELL_AUGMENTATION);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_PLAN_RETURN);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this, COMP_STREAMESTIMATE_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this,COMP_STREAMESTIMATE_STATIONS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this,COMP_STREAMESTIMATE_COEFFICIENTS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_STREAMESTIMATE_NATURAL_FLOW_TS_MONTHLY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_STREAMESTIMATE_NATURAL_FLOW_TS_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this, COMP_RIVER_NETWORK_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this, COMP_RIVER_NETWORK);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_NETWORK);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this,COMP_OPERATION_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this,COMP_OPERATION_RIGHTS);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this,COMP_DOWNSTREAM_CALL_TS_DAILY);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_SANJUAN_RIP);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+			subcomp = new DataSetComponent(this, COMP_RIO_GRANDE_SPILL);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			comp = new DataSetComponent(this, COMP_GEOVIEW_GROUP);
+			comp.setListSource(DataSetComponent.LIST_SOURCE_PRIMARY_COMPONENT);
+			addComponent(comp);
+			subcomp = new DataSetComponent(this, COMP_GEOVIEW);
+			subcomp.setData(new List<object>());
+			comp.addComponent(subcomp);
+
+			Message.printStatus(2,routine,"Initialized " + getComponents().size() + " components (files) in data set.");
+		}
+		catch (Exception e)
+		{
+			// Should not happen...
+			Message.printWarning(2, routine, e);
+		}
+	}
+
+	/// <summary>
+	/// Initialize the control data values to reasonable defaults.
+	/// </summary>
+	public virtual void initializeControlData()
+	{
+		__heading1 = "";
+		__heading2 = "";
+		__iystr = StateMod_Util.MISSING_INT; // Start year of simulation
+		__iyend = StateMod_Util.MISSING_INT;
+		__iresop = 2; // Switch for output units (default is ACFT for all)
+		__moneva = 0; // Monthly or avg monthly evap.  Default to monthly.
+		__iopflo = 1; // Total or gains streamflow.  Default to total.
+		__numpre = 0; // Number of precipitation stations - set when the time series are read -
+					  // this will be phased out in the future.
+		__numeva = 0; // Number of evaporation stations - set when the time series are read -
+					  // this will be phased out in the future
+		__interv = -1; // Max number entries in delay pattern.  Default is variable number as percents.
+		__factor = 1.9835; // Factor, CFS to AF/D
+		__rfacto = 1.9835; // Divisor for streamflow data units.
+		__dfacto = 1.9835; // Divisor for diversion data units.
+		__ffacto = 1.9835; // Divisor for instream flow data units.
+		__cfacto = 1.0; // Factor, reservoir content data to AF.
+		__efacto = 1.0; // Factor, evaporation data to FT.
+		__pfacto = 1.0; // Factor, precipitation data to FT.
+		__cyrl = YearType.CALENDAR; // Calendar/water/irrigation year - default to calendar.
+		__icondem = 1; // Switch for demand type.  Default to historic approach.
+		__ichk = 0; // Switch for detailed output.  Default is no detailed output.
+		__ireopx = 0; // Switch for re-operation control.  Default is yes re-operate.
+		__ireach = 1; // Switch for instream flow approach.
+					  // Default to use reaches and average monthly demands.
+		__icall = 0; // Switch for detailed call data.  Default to no data.
+		__ccall = ""; // Detailed call water right ID.  Default to not used.
+		__iday = 0; // Switch for daily analysis.  Default to no daily analysis.
+		__iwell = 0; // Switch for well analysis.  Default to no well analysis.
+		__gwmaxrc = 0.0; // Maximum recharge limit.  Default to not used.
+		__isjrip = 0; // San Juan recovery program.  Default to no SJRIP.
+		__itsfile = 0; // Is IPY data used?  Default to no data.
+		__ieffmax = 0; // IWR switch - default to no data.
+		__isprink = 0; // Sprinkler switch.  Default to no sprinkler data.
+		__soild = 0.0; // Soil moisture accounting.  Default to not used.
+		__isig = 0; // Significant figures for output.
+	}
+
+	/// <summary>
+	/// Initialize the data file names to basename.ext, where the basename should be
+	/// set previously and "ext" is the default extension for the file.
+	/// All file names are initialized, even if they are not used.
+	/// </summary>
+	public virtual void initializeDataFileNames()
+	{
+		IList<DataSetComponent> dataComponentList = getComponents();
+		int size = 0;
+		if (dataComponentList != null)
+		{
+			size = dataComponentList.Count;
+		}
+		DataSetComponent comp;
+		string basename = getBaseName();
+		for (int i = 0; i < size; i++)
+		{
+			comp = dataComponentList[i];
+			if (!comp.isGroup())
+			{
+				// Set the name...
+				comp.setDataFileName(basename + "." + __component_file_extensions[comp.getComponentType()]);
+				continue;
+			}
+			// FIXME SAM 2011-01-01 What is the following doing?  Does not make sense
+			// Need to add components to the group...
+			System.Collections.IList data2 = (System.Collections.IList)comp.getData();
+			int size2 = 0;
+			if (data2 != null)
+			{
+				size2 = data2.Count;
+			}
+			for (int j = 0; j < size2; j++)
+			{
+				comp = (DataSetComponent)data2[j];
+				comp.setDataFileName(basename + "." + __component_file_extensions[comp.getComponentType()]);
+			}
+		}
+	}
+
+	/// <summary>
+	/// Indicate whether the component contains time series that are impacted by the
+	/// decision of whether to read time series. </summary>
+	/// <returns> true if the component is controlled by the initial specification of whether to read time series. </returns>
+	public virtual bool isDynamicTSComponent(int comp_type)
+	{ // The following time series components are only read when __areTSRead is true...
+		if ((comp_type == COMP_DIVERSION_TS_MONTHLY) || (comp_type == COMP_DIVERSION_TS_DAILY) || (comp_type == COMP_DEMAND_TS_MONTHLY) || (comp_type == COMP_DEMAND_TS_OVERRIDE_MONTHLY) || (comp_type == COMP_DEMAND_TS_AVERAGE_MONTHLY) || (comp_type == COMP_DEMAND_TS_DAILY) || (comp_type == COMP_IRRIGATION_PRACTICE_TS_YEARLY) || (comp_type == COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY) || (comp_type == COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY) || (comp_type == COMP_RESERVOIR_CONTENT_TS_MONTHLY) || (comp_type == COMP_RESERVOIR_CONTENT_TS_DAILY) || (comp_type == COMP_RESERVOIR_TARGET_TS_MONTHLY) || (comp_type == COMP_RESERVOIR_TARGET_TS_DAILY) || (comp_type == COMP_INSTREAM_DEMAND_TS_MONTHLY) || (comp_type == COMP_INSTREAM_DEMAND_TS_AVERAGE_MONTHLY) || (comp_type == COMP_INSTREAM_DEMAND_TS_DAILY) || (comp_type == COMP_WELL_PUMPING_TS_MONTHLY) || (comp_type == COMP_WELL_PUMPING_TS_DAILY) || (comp_type == COMP_WELL_DEMAND_TS_MONTHLY) || (comp_type == COMP_WELL_DEMAND_TS_DAILY))
+		{
+			return true;
+		}
+		else
+		{
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// Determine whether a StateMod response file is free format.  The response file
+	/// is opened and checked for a non-commented line with the string "Control" followed by "=". </summary>
+	/// <param name="filename"> Full path to the StateMod response file. </param>
+	/// <returns> true if the file is a free format file. </returns>
+//JAVA TO C# CONVERTER WARNING: Method 'throws' clauses are not available in .NET:
+//ORIGINAL LINE: private boolean isFreeFormatResponseFile(String filename) throws java.io.IOException
+	private bool isFreeFormatResponseFile(string filename)
+	{
+		StreamReader @in = null;
+		bool isFreeFormat = false;
+		try
+		{
+			@in = new StreamReader(IOUtil.getInputStream(filename));
+			// Read lines and check for common strings that indicate a DateValue file.
+			string @string = null;
+			while (!string.ReferenceEquals((@string = @in.ReadLine()), null))
+			{
+				string stringTrimmed = @string.Trim();
+				if (stringTrimmed.StartsWith("#", StringComparison.Ordinal) || stringTrimmed.Equals(""))
+				{
+					// Comment
+					continue;
+				}
+				if (stringTrimmed.IndexOf("=", StringComparison.Ordinal) >= 0)
+				{
+					isFreeFormat = true;
+					break;
+				}
+			}
+		}
+		finally
+		{
+			if (@in != null)
+			{
+				@in.Close();
+			}
+		}
+		return isFreeFormat;
+	}
+
+	/// <summary>
+	/// Returns the name of the specified component.  Subcomponents (e.g., diversion
+	/// delay tables) are specifically checked and then the base class method is called. </summary>
+	/// <param name="comp_type"> the component type integer. </param>
+	/// <returns> the name of the specified component. </returns>
+	public virtual string lookupComponentName(int comp_type)
+	{
+		if (comp_type == COMP_DIVERSION_STATION_DELAY_TABLES)
+		{
+			return __COMPNAME_DIVERSION_STATION_DELAY_TABLES;
+		}
+		else if (comp_type == COMP_DIVERSION_STATION_COLLECTIONS)
+		{
+			return __COMPNAME_DIVERSION_STATION_COLLECTIONS;
+		}
+		else if (comp_type == COMP_RESERVOIR_STATION_ACCOUNTS)
+		{
+			return __COMPNAME_RESERVOIR_STATION_ACCOUNTS;
+		}
+		else if (comp_type == COMP_RESERVOIR_STATION_PRECIP_STATIONS)
+		{
+			return __COMPNAME_RESERVOIR_STATION_PRECIP_STATIONS;
+		}
+		else if (comp_type == COMP_RESERVOIR_STATION_EVAP_STATIONS)
+		{
+			return __COMPNAME_RESERVOIR_STATION_EVAP_STATIONS;
+		}
+		else if (comp_type == COMP_RESERVOIR_STATION_CURVE)
+		{
+			return __COMPNAME_RESERVOIR_STATION_CURVE;
+		}
+		else if (comp_type == COMP_RESERVOIR_STATION_COLLECTIONS)
+		{
+			return __COMPNAME_RESERVOIR_STATION_COLLECTIONS;
+		}
+		else if (comp_type == COMP_WELL_STATION_DELAY_TABLES)
+		{
+			return __COMPNAME_WELL_STATION_DELAY_TABLES;
+		}
+		else if (comp_type == COMP_WELL_STATION_DEPLETION_TABLES)
+		{
+			return __COMPNAME_WELL_STATION_DEPLETION_TABLES;
+		}
+		else if (comp_type == COMP_WELL_STATION_COLLECTIONS)
+		{
+			return __COMPNAME_WELL_STATION_COLLECTIONS;
+		}
+		else
+		{
+			return base.lookupComponentName(comp_type);
+		}
+	}
+
+	/// <summary>
+	/// Determine the component type for a string time series data type and interval. </summary>
+	/// <param name="data_type"> Time series data type </param>
+	/// <param name="interval"> Data interval as TimeInterval.MONTH or TimeInterval.DAY. </param>
+	/// <returns> the component type for a time series, or COMP_UNKNOWN if not found. </returns>
+	public static int lookupTimeSeriesDataComponentType(string data_type, int interval)
+	{
+		int length = __component_ts_data_types.Length;
+		for (int i = 0; i < length; i++)
+		{
+			if (__component_ts_data_types[i].Equals(data_type, StringComparison.OrdinalIgnoreCase) && (__component_ts_data_intervals[i] == interval))
+			{
+				return i;
+			}
+		}
+		return COMP_UNKNOWN;
+	}
+
+	/// <summary>
+	/// Determine the time series data type string for a component type. </summary>
+	/// <param name="comp_type"> Component type. </param>
+	/// <returns> the time series data type string or an empty string if not found.
+	/// The only problem is with COMP_RESERVOIR_TARGET_TS_MONTHLY and
+	/// COMP_RESERVOIR_TARGET_TS_DAILY, each of which contain both the maximum and
+	/// minimum time series.  For these components, add "Max" and "Min" to the returned values. </returns>
+	public static string lookupTimeSeriesDataType(int comp_type)
+	{
+		return __component_ts_data_types[comp_type];
+	}
+
+	/// <summary>
+	/// Determine the time series data units string for a component type.  There is
+	/// currently no plan to have different units - StateMod units are constant. </summary>
+	/// <param name="comp_type"> Component type. </param>
+	/// <returns> the time series data units string or an empty string if not found. </returns>
+	public static string lookupTimeSeriesDataUnits(int comp_type)
+	{
+		return __component_ts_data_units[comp_type];
+	}
+
+	/// <summary>
+	/// Determine the time series file extension string for a string time series data type and interval. </summary>
+	/// <param name="data_type"> Time series data type </param>
+	/// <param name="interval"> Data interval as TimeInterval.MONTH or TimeInterval.DAY. </param>
+	/// <returns> the time series data units string or an empty string if not found. </returns>
+	public static string lookupTimeSeriesDataFileExtension(string data_type, int interval)
+	{
+		int length = __component_ts_data_types.Length;
+		for (int i = 0; i < length; i++)
+		{
+			if (__component_ts_data_types[i].Equals(data_type, StringComparison.OrdinalIgnoreCase) && (__component_ts_data_intervals[i] == interval))
+			{
+				return __component_file_extensions[i];
+			}
+		}
+		return "";
+	}
+
+	/// <summary>
+	/// Determine the data set type from a string. </summary>
+	/// <param name="type"> Data set type as a string </param>
+	/// <returns> the data set type as an int or -1 if not found. </returns>
+	public static int lookupType(string type)
+	{
+		if (type.Equals(NAME_UNKNOWN, StringComparison.OrdinalIgnoreCase))
+		{
+			return TYPE_UNKNOWN;
+		}
+		return TYPE_UNKNOWN;
+	}
+
+	/// <summary>
+	/// Return the data set type name.  This is suitable for warning messages and simple output. </summary>
+	/// <param name="dataset_type"> data set type(see TYPE_*) </param>
+	/// <returns> the data set type name. </returns>
+	public static string lookupTypeName(int dataset_type)
+	{
+		if (dataset_type == TYPE_UNKNOWN)
+		{
+			return NAME_UNKNOWN;
+		}
+		return NAME_UNKNOWN;
+	}
+
+	public bool DUMP_DIRTY = false;
+
+	/// <summary>
+	/// Set a component dirty (edited).  This method is usually called by the set
+	/// methods in the individual StateMod_Data classes.  This marks the component as
+	/// dirty independent of the state of the individual data objects in the component.
+	/// If a component is dirty, it needs to be written to a file because data or the file name have changed. </summary>
+	/// <param name="componentType"> The component type within the data set(see COMP*). </param>
+	/// <param name="isDirty"> true if the component should be marked as dirty (edited), false
+	/// if the component should be marked clean (from data read, or edits saved). </param>
+	public virtual void setDirty(int componentType, bool isDirty)
+	{
+		DataSetComponent comp = getComponentForComponentType(componentType);
+		if (comp != null)
+		{
+			comp.setDirty(isDirty);
+			//if ( Message.isDebugOn ) {
+			//	Message.printDebug(1, "", "Setting component \"" + comp.getComponentName() + "\" dirty=" + isDirty);
+			//	throw new RuntimeException ( "Find this");
+			//}
+		}
+	}
+
+	/// <summary>
+	/// Read a StateMod control file and stores its information in this StateMod_DataSet object. </summary>
+	/// <param name="filename"> the file in which the control file is stored </param>
+	/// <exception cref="Exception"> if an error occurs </exception>
+//JAVA TO C# CONVERTER WARNING: Method 'throws' clauses are not available in .NET:
+//ORIGINAL LINE: public void readStateModControlFile(String filename) throws Exception
+	public virtual void readStateModControlFile(string filename)
+	{
+		string routine = "StateMod_DataSet.readStateModControlFile";
+		int line_num = 0;
+		string iline = null;
+		StreamReader @in = null;
+		string nextToken = null;
+		StringTokenizer split = null;
+
+		if (Message.isDebugOn)
+		{
+			Message.printDebug(10, routine, "Reading control file \"" + filename + "\"");
+		}
+
+		try
+		{
+			@in = new StreamReader(filename);
+			while (!string.ReferenceEquals((iline = @in.ReadLine()), null))
+			{
+				if (iline.StartsWith("#", StringComparison.Ordinal) || iline.Trim().Length == 0)
+				{
+					continue;
+				}
+				line_num++;
+				split = new StringTokenizer(iline);
+				if ((split == null) || (split.countTokens() == 0))
+				{
+					continue;
+				}
+				nextToken = split.nextToken();
+				if (nextToken.Equals(":"))
+				{
+					continue;
+				}
+				switch (line_num)
+				{
+					// Non-comment lines
+					case 1:
+						setHeading1(iline);
+						break;
+					case 2:
+						setHeading2(iline);
+						break;
+					case 3:
+						setIystr(nextToken);
+						break;
+					case 4:
+						setIyend(nextToken);
+						break;
+					case 5:
+						setIresop(nextToken);
+						break;
+					case 6:
+						setMoneva(nextToken);
+						break;
+					case 7:
+						setIopflo(nextToken);
+						break;
+					case 8:
+						setNumpre(nextToken);
+						break;
+					case 9:
+						setNumeva(nextToken);
+						break;
+					case 10:
+						setInterv(nextToken);
+						break;
+					case 11:
+						setFactor(nextToken);
+						break;
+					case 12:
+						setRfacto(nextToken);
+						break;
+					case 13:
+						setDfacto(nextToken);
+						break;
+					case 14:
+						setFfacto(nextToken);
+						break;
+					case 15:
+						setCfacto(nextToken);
+						break;
+					case 16:
+						setEfacto(nextToken);
+						break;
+					case 17:
+						setPfacto(nextToken);
+						break;
+					case 18:
+						setCyrl(nextToken);
+						break;
+					case 19:
+						setIcondem(nextToken);
+						break;
+					case 20:
+						setIchk(nextToken);
+						break;
+					case 21:
+						setIreopx(nextToken);
+						break;
+					case 22:
+						setIreach(nextToken);
+						break;
+					case 23:
+						setIcall(nextToken);
+						break;
+					case 24:
+						setCcall(nextToken);
+						break;
+					case 25:
+						setIday(nextToken);
+						break;
+					case 26:
+						setIwell(nextToken);
+						break;
+					case 27:
+						setGwmaxrc(nextToken);
+						break;
+					case 28:
+						setIsjrip(nextToken);
+						break;
+					case 29:
+						setItsfile(nextToken);
+						break;
+					case 30:
+						setIeffmax(nextToken);
+						break;
+					case 31:
+						setIsprink(nextToken);
+						break;
+					case 32:
+						setSoild(nextToken);
+						break;
+					case 33:
+						setIsig(nextToken);
+						break;
+				}
+			}
+		}
+		catch (Exception e)
+		{
+			Message.printWarning(2, routine, e);
+			throw e;
+		}
+		finally
+		{
+			if (@in != null)
+			{
+				@in.Close();
+			}
+		}
+	}
+
+	// TODO - StateCU has this return a DataSet object, not populate an existing one
+	/// <summary>
+	/// Read the StateMod response file and fill the current StateMod_DataSet object.
+	/// The file MUST be a newer free-format response file.
+	/// The file and settings that are read are those set when the object was created. </summary>
+	/// <param name="filename"> Name of the StateMod response file.  This must be the
+	/// full path (e.g., from a JFileChooser, with a drive).  The working directory will
+	/// be set to the directory of the response file. </param>
+	/// <param name="readData"> if true, then all the data for files in the response file are read, if false, only read
+	/// the filenames from the response file but do not try to read the
+	/// data from station, rights, time series, etc.  False is useful for testing I/O on the response file itself. </param>
+	/// <param name="readTimeSeries"> indicates whether the time series files should be read (this parameter was implemented
+	/// when performance was slow and it made sense to avoid reading time series - this paramter may be phased out
+	/// because it is not generally how an issue to read the time series).  If readData=false, then time series
+	/// will not be read in any case. </param>
+	/// <param name="useGUI"> If true, then interactive prompts will be used where necessary. </param>
+	/// <param name="parent"> The parent JFrame used to position warning dialogs if useGUI is true. </param>
+	/// <exception cref="IllegalArgumentException"> if the specified file does not appear to be a free-format response file. </exception>
+	/// <exception cref="IOException"> if there is an unhandled error reading files. </exception>
+//JAVA TO C# CONVERTER WARNING: Method 'throws' clauses are not available in .NET:
+//ORIGINAL LINE: public void readStateModFile(String filename, boolean readData, boolean readTimeSeries, boolean useGUI, javax.swing.JFrame parent) throws IllegalArgumentException, java.io.IOException
+	public virtual void readStateModFile(string filename, bool readData, bool readTimeSeries, bool useGUI, JFrame parent)
+	{
+		string routine = "StateMod_DataSet.readStateModFile";
+		if (!readData)
+		{
+			readTimeSeries = false;
+		}
+		__readTimeSeries = readTimeSeries;
+
+		File f = new File(filename);
+		setDataSetDirectory(f.getParent());
+		setDataSetFileName(f.getName());
+
+		// String printed at the end of warning messages
+		string warningEndString = "\".";
+		if (useGUI)
+		{
+			// This string is used if there are problems reading.
+			warningEndString = "\"\nInteractive edits for file will be disabled.";
+		}
+
+		// Check whether the response file is free format.  If it is free
+		// format then the file is read into a PropList below...
+
+		if (!isFreeFormatResponseFile(filename))
+		{
+			string message = "File \"" + filename +
+				"\" does not appear to be free-format response file - unable to read.";
+			Message.printWarning(3,routine, message);
+			throw new System.ArgumentException(message);
+		}
+
+		// Set the working directory to that of the response file...
+
+		IOUtil.setProgramWorkingDir(f.getParent());
+
+		// The following sets the static reference to the current data set
+		// which is then accessible by every data object which extends
+		// StateMod_Data.  This is done in order that setting components
+		// dirty or not can be handled at a low level when values change.
+		StateMod_Data._dataset = this;
+
+		// Set basic information about the response file component - only save
+		// the file name - the data itself are stored in this data set object.
+
+		getComponentForComponentType(COMP_RESPONSE).setDataFileName(f.getName());
+
+		string fn = "";
+
+		int i = 0;
+		int size = 0; // For general use
+
+		DataSetComponent comp = null; // Component in StateMod data set
+
+		// Now start reading new scenario...
+		StopWatch totalReadTime = new StopWatch();
+		StopWatch readTime = new StopWatch();
+
+		Message.printStatus(1, routine, "Reading all information from input directory: \"" + getDataSetDirectory());
+
+		Message.printStatus(1, routine, "Reading response file \"" + filename + "\"");
+
+		totalReadTime.start();
+
+		// Read the response file into a PropList...
+		PropList response_props = new PropList("Response");
+		response_props.setPersistentName(filename);
+		response_props.readPersistent();
+
+		try
+		{
+			// Try for all reads.
+
+			// Read the lines of the response file.  Of major importance is reading the control file,
+			// which indicates data set properties that allow figuring out which files are being read.
+
+			// Read the files in the order of the StateMod documentation for the
+			// response file, checking the control settings where a decision is needed.
+
+			// Control file (.ctl)...
+
+			try
+			{
+				fn = response_props.getValue("Control");
+
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_CONTROL);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					readStateModControlFile(fn);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Unexpected error reading control file:\n" + "\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				// Control does not have its own data file now so use the data set.
+				comp.setData(this);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// River network file (.rin)...
+
+			try
+			{
+				fn = response_props.getValue("River_Network");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_RIVER_NETWORK);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_RiverNetworkNode.readStateModFile(fn));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading river network file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Reservoir stations file (.res)...
+
+			try
+			{
+				fn = response_props.getValue("Reservoir_Station");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_RESERVOIR_STATIONS);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_Reservoir.readStateModFile(fn));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading reservoir station file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Diversion stations file (.dds)...
+
+			try
+			{
+				fn = response_props.getValue("Diversion_Station");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_DIVERSION_STATIONS);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_Diversion.readStateModFile(fn));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading diversion station file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Stream gage stations file (.ris)...
+
+			try
+			{
+				fn = response_props.getValue("StreamGage_Station");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_STREAMGAGE_STATIONS);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_StreamGage.readStateModFile(fn));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading stream gage stations file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// If not a free-format data set with separate stream estimate station,
+			// re-read the legacy stream station file because some stations will be stream estimate stations.
+			// If free format, get the file name...
+
+			try
+			{
+				fn = response_props.getValue("StreamEstimate_Station");
+				if (string.ReferenceEquals(fn, null))
+				{
+					// Get from the stream gage component because Ray has not adopted a separate stream
+					// estimate file...
+					Message.printStatus(2, routine, "Using StreamGage_Station for StreamEstimage_Station (no separate 2nd file).");
+					comp = getComponentForComponentType(COMP_STREAMGAGE_STATIONS);
+					if (comp == null)
+					{
+						fn = null;
+					}
+					else
+					{
+						fn = comp.getDataFileName();
+					}
+				}
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_STREAMESTIMATE_STATIONS);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// (Re)read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					// Use the relative path...
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_StreamEstimate.readStateModFile(fn));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading stream estimate stations file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Instream flow stations file (.ifs)...
+
+			try
+			{
+				fn = response_props.getValue("Instreamflow_Station");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_INSTREAM_STATIONS);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_InstreamFlow.readStateModFile(fn));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading instream flow station file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Well stations...
+
+			try
+			{
+				fn = response_props.getValue("Well_Station");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_WELL_STATIONS);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && hasWellData(false) && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_Well.readStateModFile(fn));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading well station file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Plans...
+
+			try
+			{
+				fn = response_props.getValue("Plan_Data");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_PLANS);
+				if (comp == null)
+				{
+					Message.printWarning(2, routine, "Unable to look up plans component " + COMP_PLANS);
+				}
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_Plan.readStateModFile(fn));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading plan file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Plan well augmentation (.plw)...
+
+			try
+			{
+				fn = response_props.getValue("Plan_Wells");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_PLAN_WELL_AUGMENTATION);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_Plan_WellAugmentation.readStateModFile(fn));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading plan well augmentation file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Plan return (.prf)...
+
+			try
+			{
+				fn = response_props.getValue("Plan_Return");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_PLAN_RETURN);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_ReturnFlow.readStateModFile(fn,COMP_PLAN_RETURN));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading plan return file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Instream flow rights file (.ifr)...
+
+			try
+			{
+				fn = response_props.getValue("Instreamflow_Right");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_INSTREAM_RIGHTS);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_InstreamFlowRight.readStateModFile(fn));
+					Message.printStatus(1, routine, "Connecting instream flow rights to stations.");
+					StateMod_InstreamFlow.connectAllRights((System.Collections.IList)getComponentForComponentType(COMP_INSTREAM_STATIONS).getData(), (System.Collections.IList)comp.getData());
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading instream flow rights file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Reservoir rights file (.rer)...
+
+			try
+			{
+				fn = response_props.getValue("Reservoir_Right");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_RESERVOIR_RIGHTS);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_ReservoirRight.readStateModFile(fn));
+					Message.printStatus(1, routine, "Connecting reservoir rights with reservoir stations.");
+					StateMod_Reservoir.connectAllRights((System.Collections.IList)getComponentForComponentType(COMP_RESERVOIR_STATIONS).getData(), (System.Collections.IList)comp.getData());
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading reservoir rights file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Diversion rights file (.ddr)...
+
+			try
+			{
+				fn = response_props.getValue("Diversion_Right");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_DIVERSION_RIGHTS);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_DiversionRight.readStateModFile(fn));
+					Message.printStatus(1, routine, "Connecting diversion rights to diversion stations");
+					StateMod_Diversion.connectAllRights((System.Collections.IList)getComponentForComponentType(COMP_DIVERSION_STATIONS).getData(), (System.Collections.IList)comp.getData());
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading diversion rights file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Operational rights file (.opr)...
+
+			try
+			{
+				fn = response_props.getValue("Operational_Right");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_OPERATION_RIGHTS);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_OperationalRight.readStateModFile(fn, this));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading operational rights file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				comp.setErrorReadingInputFile(true);
+				Message.printWarning(3, routine, e);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Well rights file (.wer)...
+
+			try
+			{
+				fn = response_props.getValue("Well_Right");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_WELL_RIGHTS);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_WellRight.readStateModFile(fn));
+					Message.printStatus(1, routine, "Connecting well rights to well stations.");
+					StateMod_Well.connectAllRights((System.Collections.IList)getComponentForComponentType(COMP_WELL_STATIONS).getData(), (System.Collections.IList)comp.getData());
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading well rights file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			try
+			{
+				fn = response_props.getValue("Precipitation_Monthly");
+				// Always set the file name in the component...
+				comp = getComponentForComponentType(COMP_PRECIPITATION_TS_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the file...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					// TODO Old-style data that may be removed in new StateMod...
+					setNumpre(size);
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_PRECIPITATION_TS_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading precipitation time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Precipitation TS yearly file (.pra) - always read...
+
+			try
+			{
+				fn = response_props.getValue("Precipitation_Annual");
+				// Always set the file name in the component...
+				Message.printStatus(2,routine,"StateMod GUI does not yet handle annual precipitation data.");
+				comp = getComponentForComponentType(COMP_PRECIPITATION_TS_YEARLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the file...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					// TODO Old-style data that may be removed in new StateMod...
+					setNumpre(size);
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_PRECIPITATION_TS_YEARLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading annual precipitation time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Evaporation time series file monthly (.eva) - always read...
+
+			try
+			{
+				fn = response_props.getValue("Evaporation_Monthly");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_EVAPORATION_TS_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					// TODO Old-style data that may be removed in new StateMod...
+					setNumeva(size);
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_EVAPORATION_TS_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading evaporation time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Evaporation time series file yearly (.eva) - always read...
+
+			try
+			{
+				fn = response_props.getValue("Evaporation_Annual");
+				Message.printStatus(2,routine,"StateMod GUI does not yet handle annual evaporation data.");
+
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_EVAPORATION_TS_YEARLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					// TODO Old-style data that may be removed in new StateMod...
+					setNumeva(size);
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_EVAPORATION_TS_YEARLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading annual evaporation time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Stream gage natural flow time series (.rim or .xbm) - always read...
+
+			DataSetComponent comp2 = null;
+			try
+			{
+				fn = response_props.getValue("Stream_Base_Monthly");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_STREAMGAGE_NATURAL_FLOW_TS_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_STREAMGAGE_NATURAL_FLOW_TS_MONTHLY));
+					}
+					comp.setData(v);
+
+					// The StreamGage and StreamEstimate groups share the same natural flow time series files...
+
+					comp2 = getComponentForComponentType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_MONTHLY);
+					comp2.setDataFileName(comp.getDataFileName());
+					comp2.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading natural flow time series (monthly) file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				if (comp2 != null)
+				{
+					// Never read data above so no need to call the following
+					comp2.setDirty(false);
+				}
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Diversion direct flow demand time series (monthly) file (.ddm)...
+
+			try
+			{
+				fn = response_props.getValue("Diversion_Demand_Monthly");
+				// Always set the file name in the component...
+				comp = getComponentForComponentType(COMP_DEMAND_TS_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					readStateModFile_Announce1(comp);
+					fn = getDataFilePathAbsolute(fn);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading demand time series (monthly) file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Direct flow demand time series override (monthly) file (.ddo)...
+
+			try
+			{
+				fn = response_props.getValue("Diversion_DemandOverride_Monthly");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_DEMAND_TS_OVERRIDE_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					readStateModFile_Announce1(comp);
+					fn = getDataFilePathAbsolute(fn);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_OVERRIDE_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading demand time series override (monthly) file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Direct flow demand time series average (monthly) file (.dda)...
+
+			try
+			{
+				fn = response_props.getValue("Diversion_Demand_AverageMonthly");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_DEMAND_TS_AVERAGE_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					readStateModFile_Announce1(comp);
+					fn = getDataFilePathAbsolute(fn);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_AVERAGE_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading demand time series (average monthly) file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Monthly instream flow demand...
+
+			try
+			{
+				fn = response_props.getValue("Instreamflow_Demand_Monthly");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_INSTREAM_DEMAND_TS_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data file...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					readStateModFile_Announce1(comp);
+					fn = getDataFilePathAbsolute(fn);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading monthly instream flow demand time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Instream demand time series (average monthly) file (.ifa)...
+
+			try
+			{
+				fn = response_props.getValue("Instreamflow_Demand_AverageMonthly");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_INSTREAM_DEMAND_TS_AVERAGE_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_AVERAGE_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading instream flow demand time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Well demand time series (monthly) file (.wem)...
+
+			try
+			{
+				fn = response_props.getValue("Well_Demand_Monthly");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_WELL_DEMAND_TS_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_WELL_DEMAND_TS_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading well demand time series (monthly) file:\n" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Delay file (monthly) file (.dly)...
+
+			try
+			{
+				fn = response_props.getValue("DelayTable_Monthly");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_DELAY_TABLES_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_DelayTable.readStateModFile(fn,true,getInterv()));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading delay table (monthly) file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Reservoir target time series (monthly) file (.tar)...
+
+			try
+			{
+				fn = response_props.getValue("Reservoir_Target_Monthly");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_RESERVOIR_TARGET_TS_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						if ((i % 2) == 0)
+						{
+							((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_MONTHLY) + "Min");
+						}
+						else
+						{
+							((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_MONTHLY) + "Max");
+						}
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading reservoir target time series (monthly) file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Reservoir return (.rrf)...
+
+			try
+			{
+				fn = response_props.getValue("Reservoir_Return");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_RESERVOIR_RETURN);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_ReturnFlow.readStateModFile(fn,COMP_RESERVOIR_RETURN));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading reservoir return file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// TODO - San Juan Sediment Recovery
+
+			try
+			{
+				fn = response_props.getValue("SanJuanRecovery");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_SANJUAN_RIP);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				//readInputAnnounce1(comp);
+				if (readData && (!string.ReferenceEquals(fn, null)) && hasSanJuanData(false) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					Message.printWarning(1, routine, "Do not know how to read the San Juan Recovery file.");
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading San Juan Recovery file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				//readInputAnnounce2(comp, readTime.getSeconds() );
+			}
+
+			// TODO SAM 2011-01-16 Enable - Rio Grande Spill
+
+			try
+			{
+				fn = response_props.getValue("RioGrande_Spill_Monthly");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_RIO_GRANDE_SPILL);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				//readInputAnnounce1(comp);
+				if (readData && (!string.ReferenceEquals(fn, null)) && hasSanJuanData(false) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					Message.printWarning(1, routine, "Reading Rio Grande Spill file is not enabled.");
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading Rio Grande Spill file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				//readInputAnnounce2(comp, readTime.getSeconds() );
+			}
+
+			// Irrigation practice time series (tsp/ipy)...
+
+			try
+			{
+				fn = response_props.getValue("IrrigationPractice_Yearly");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_IRRIGATION_PRACTICE_TS_YEARLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateCU_IrrigationPracticeTS.readStateCUFile(fn, null, null));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading irrigation practice file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Irrigation water requirement (iwr) - monthly...
+
+			try
+			{
+				fn = response_props.getValue("ConsumptiveWaterRequirement_Monthly");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1,routine,"Error reading irrigation water requirement (monthly) time series " + "file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// StateMod used to read PAR but the AWC is now in the StateCU STR file.
+
+			try
+			{
+				fn = response_props.getValue("StateCU_Structure");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_STATECU_STRUCTURE);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateCU_Location.readStateCUFile(fn));
+					Message.printStatus(2,routine,"Read " + ((System.Collections.IList)comp.getData()).Count + " locations.");
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading StateCU structure file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Soil moisture (*.par) file no longer supported (print a warning)...
+
+			fn = response_props.getValue("SoilMoisture");
+			if ((!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+			{
+				Message.printWarning(2, routine, "StateCU soil moisture file - not supported - not reading \"" + fn + "\"");
+			}
+
+			// Reservoir content time series (monthly) file (.eom)...
+
+			try
+			{
+				fn = response_props.getValue("Reservoir_Historic_Monthly");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_RESERVOIR_CONTENT_TS_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					// Set the data type because it is not in the StateMod file...
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_CONTENT_TS_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading reservoir end of month time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Stream estimate coefficients file (.rib)...
+
+			try
+			{
+				fn = response_props.getValue("StreamEstimate_Coefficients");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_STREAMESTIMATE_COEFFICIENTS);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_StreamEstimate_Coefficients.readStateModFile(fn));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading stream estimate coefficient file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Historical streamflow (monthly) file (.rih)...
+
+			try
+			{
+				fn = response_props.getValue("StreamGage_Historic_Monthly");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_STREAMGAGE_HISTORICAL_TS_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						// Set this information because it is not in the StateMod time series file...
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_STREAMGAGE_HISTORICAL_TS_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading historical streamflow time series file:\n\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Diversion time series (historical monthly) file (.ddh)...
+
+			try
+			{
+				fn = response_props.getValue("Diversion_Historic_Monthly");
+				// Make sure the file name is set in the component...
+				comp = getComponentForComponentType(COMP_DIVERSION_TS_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the file if requested...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					readStateModFile_Announce1(comp);
+					fn = getDataFilePathAbsolute(fn);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DIVERSION_TS_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading historical diversion time series (monthly) file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Well historical pumping time series (monthly) file (.weh)..
+
+			try
+			{
+				fn = response_props.getValue("Well_Historic_Monthly");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_WELL_PUMPING_TS_MONTHLY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_WELL_PUMPING_TS_MONTHLY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading well pumping time series (monthly) file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// GeoView project file...
+
+			try
+			{
+				fn = response_props.getValue("GeographicInformation");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_GEOVIEW);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				if ((!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					//readInputAnnounce1(comp);
+				}
+			}
+			catch (Exception e)
+			{
+				// Print this at level 2 because the main GUI will warn if it
+				// cannot read the file.  We don't want 2 warnings.
+				Message.printWarning(2, routine, "Unable to read/process GeoView project file \"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				//readInputAnnounce2(comp, readTime.getSeconds() );
+				// Read data and display when the GUI is shown - no read for data to be read if no GUI
+			}
+
+			// TODO - output control - this is usually read separately when
+			// running reports, etc.  Just read the line but do not read the file...
+
+			try
+			{
+				fn = response_props.getValue("OutputRequest");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_OUTPUT_REQUEST);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				//readInputAnnounce1(comp, readTime.getSeconds() );
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading output control file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				//readInputAnnounce2(comp, readTime.getSeconds() );
+				// Read data and display when the GUI is shown - no read for data to be read if no GUI
+			}
+
+			// TODO SAM 2011-01-16 Eanble reach data file
+
+			try
+			{
+				fn = response_props.getValue("Reach_Data");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_REACH_DATA);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				//readInputAnnounce1(comp, readTime.getSeconds());
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					Message.printWarning(2, routine, "Reach data file - not yet supported.");
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading reach data file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				//readInputAnnounce2(comp, readTime.getSeconds());
+			}
+
+			// Stream natural flow flow time series (daily) file (.rid)...
+			// Always read if a daily data set.
+
+			try
+			{
+				fn = response_props.getValue("Stream_Base_Daily");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_STREAMGAGE_NATURAL_FLOW_TS_DAILY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_STREAMGAGE_NATURAL_FLOW_TS_DAILY));
+					}
+					comp.setData(v);
+
+					// The StreamGage and StreamEstimate groups share the same natural flow time series files...
+
+					comp2 = getComponentForComponentType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_DAILY);
+					comp2.setDataFileName(comp.getDataFileName());
+					comp2.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading daily natural flow time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				if (comp2 != null)
+				{
+					// Never read data above so no need to call the following
+					comp2.setDirty(false);
+				}
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Direct diversion demand time series (daily) file (.ddd)...
+
+			try
+			{
+				fn = response_props.getValue("Diversion_Demand_Daily");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_DEMAND_TS_DAILY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_DAILY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading daily demand time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Instream flow demand time series (daily) file (.ifd)...
+
+			try
+			{
+				fn = response_props.getValue("Instreamflow_Demand_Daily");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_INSTREAM_DEMAND_TS_DAILY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_DAILY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading daily instream flow demand time series" + " file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Well demand time series (daily) file (.wed)...
+
+			try
+			{
+				fn = response_props.getValue("Well_Demand_Daily");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_WELL_DEMAND_TS_DAILY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_WELL_DEMAND_TS_DAILY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading daily well demand time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Reservoir target time series (daily) file (.tad)...
+
+			try
+			{
+				fn = response_props.getValue("Reservoir_Target_Daily");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_RESERVOIR_TARGET_TS_DAILY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						if ((i % 2) == 0)
+						{
+							((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_DAILY) + "Min");
+						}
+						else
+						{
+							((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_DAILY) + "Max");
+						}
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading daily reservoir target time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Delay table (daily)...
+
+			try
+			{
+				fn = response_props.getValue("DelayTable_Daily");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_DELAY_TABLES_DAILY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_DelayTable.readStateModFile(fn,false,getInterv()));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading delay table (daily) file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Irrigation water requirement (iwr) - daily...
+
+			try
+			{
+				fn = response_props.getValue("ConsumptiveWaterRequirement_Daily");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading irrigation water requirement (daily) time series " + "file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Streamflow historical time series (daily) file (.riy) - always read...
+
+			try
+			{
+				fn = response_props.getValue("StreamGage_Historic_Daily");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_STREAMGAGE_HISTORICAL_TS_DAILY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null,null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						// Set this information because it is not in the StateMod time series file...
+						((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_STREAMGAGE_HISTORICAL_TS_DAILY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading daily historical streamflow time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Diversion (daily) time series (.ddd)...
+
+			try
+			{
+				fn = response_props.getValue("Diversion_Historic_Daily");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_DIVERSION_TS_DAILY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					// Set the data type because it is not in the StateMod file...
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DIVERSION_TS_DAILY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading diversion (daily) time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Well pumping (daily) time series...
+
+			try
+			{
+				fn = response_props.getValue("Well_Historic_Daily");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_WELL_PUMPING_TS_DAILY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Now read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					// Set the data type because it is not in the StateMod file...
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_WELL_PUMPING_TS_DAILY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading well pumping (daily) time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Daily reservoir content "eoy"...
+
+			try
+			{
+				fn = response_props.getValue("Reservoir_Historic_Daily");
+				// Set the file name in the component...
+				comp = getComponentForComponentType(COMP_RESERVOIR_CONTENT_TS_DAILY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data file...
+				if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+					if (v == null)
+					{
+						v = new List<object>();
+					}
+					// Set the data type because it is not in the StateMod file...
+					size = v.Count;
+					for (i = 0; i < size; i++)
+					{
+						((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_CONTENT_TS_DAILY));
+					}
+					comp.setData(v);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading reservoir end of day time series file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Downstream call (.cal)...
+
+			try
+			{
+				fn = response_props.getValue("Downstream_Call");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_DOWNSTREAM_CALL_TS_DAILY);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					comp.setData(StateMod_DownstreamCall.readStateModFile(fn));
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Error reading downstream call file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+
+			// Keep track of files/properties that are not explicitly handled in this class
+			// These may be new files added to the model, old files being phased out, or simple properties.
+			PropList unhandledResponseFileProperties = getUnhandledResponseFileProperties();
+			unhandledResponseFileProperties.clear();
+			for (int iProp = 0; iProp < response_props.size(); iProp++)
+			{
+				Prop prop = response_props.elementAt(iProp);
+				string fileKey = prop.getKey();
+				// See if the key is matched in the known StateMod file type keys...
+				bool found = false;
+				for (int iFile = 0; iFile < __statemod_file_properties.Length; iFile++)
+				{
+					if (fileKey.Equals(__statemod_file_properties[iFile], StringComparison.OrdinalIgnoreCase))
+					{
+						found = true;
+						break;
+					}
+				}
+				if (!found)
+				{
+					// The file property was not found so need to carry around as unknown
+					Message.printStatus(2,routine,"Unhandled response file property:  " + prop.getKey() + " = " + prop.getValue());
+					unhandledResponseFileProperties.set(prop);
+				}
+			}
+
+			// Print information about all the data (for troubleshooting)...
+			Message.printStatus(2, routine, "\n" + toStringDefinitions());
+
+			// After reading, link objects using identifiers in the various files...
+
+			// Connect all the instream flow time series to the stations...
+
+			Message.printStatus(1,routine,"Connect all instream flow time series");
+			StateMod_InstreamFlow.connectAllTS((System.Collections.IList)getComponentForComponentType(COMP_INSTREAM_STATIONS).getData(), (System.Collections.IList)getComponentForComponentType(COMP_INSTREAM_DEMAND_TS_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_INSTREAM_DEMAND_TS_AVERAGE_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_INSTREAM_DEMAND_TS_DAILY).getData());
+
+			// Connect all the reservoir time series to the stations...
+
+			StateMod_Reservoir.connectAllTS((System.Collections.IList)getComponentForComponentType(COMP_RESERVOIR_STATIONS).getData(), (System.Collections.IList)getComponentForComponentType(COMP_RESERVOIR_CONTENT_TS_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_RESERVOIR_CONTENT_TS_DAILY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_RESERVOIR_TARGET_TS_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_RESERVOIR_TARGET_TS_DAILY).getData());
+
+			// Connect all the diversion time series to the stations...
+
+			Message.printStatus(1, routine, "Connect all diversion time series");
+			StateMod_Diversion.connectAllTS((System.Collections.IList)getComponentForComponentType(COMP_DIVERSION_STATIONS).getData(), (System.Collections.IList)getComponentForComponentType(COMP_DIVERSION_TS_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_DIVERSION_TS_DAILY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_DEMAND_TS_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_DEMAND_TS_OVERRIDE_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_DEMAND_TS_AVERAGE_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_DEMAND_TS_DAILY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_IRRIGATION_PRACTICE_TS_YEARLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY).getData());
+
+			// Connect all the well time series to the stations...
+
+			Message.printStatus(1, routine, "Connect all well time series");
+			StateMod_Well.connectAllTS((System.Collections.IList)getComponentForComponentType(COMP_WELL_STATIONS).getData(), (System.Collections.IList)getComponentForComponentType(COMP_WELL_PUMPING_TS_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_WELL_PUMPING_TS_DAILY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_WELL_DEMAND_TS_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_WELL_DEMAND_TS_DAILY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_IRRIGATION_PRACTICE_TS_YEARLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY).getData());
+
+			// Process the old-style ris, rim, rid files for the new convention...
+
+			// TODO SAM 2009-06-30 Evaluate if the following is being handled ok free format
+			/*
+			if ( !__is_free_format ) {
+				StateMod_StreamEstimate.processStreamData ( 
+				(List)getComponentForComponentType( COMP_STREAMGAGE_STATIONS).getData(),
+				(List)getComponentForComponentType( COMP_STREAMGAGE_HISTORICAL_TS_MONTHLY).getData(),
+				(List)getComponentForComponentType( COMP_STREAMESTIMATE_STATIONS).getData(),
+				(List)getComponentForComponentType( COMP_STREAMESTIMATE_COEFFICIENTS).getData() );
+			}	// Else the StreamGage and StreamEstimate stations are already split into separate files.
+			*/
+
+			// Connect all the stream gage station time series to the stations...
+
+			Message.printStatus(1,routine,"Connect all river station time series");
+			StateMod_StreamGage.connectAllTS((System.Collections.IList)getComponentForComponentType(COMP_STREAMGAGE_STATIONS).getData(), (System.Collections.IList)getComponentForComponentType(COMP_STREAMGAGE_HISTORICAL_TS_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_STREAMGAGE_HISTORICAL_TS_DAILY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_STREAMGAGE_NATURAL_FLOW_TS_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_STREAMGAGE_NATURAL_FLOW_TS_DAILY).getData());
+
+			// Connect all the stream estimate station time series to the stations...
+
+			Message.printStatus(1,routine, "Connect all stream estimate station time series");
+			StateMod_StreamEstimate.connectAllTS((System.Collections.IList)getComponentForComponentType(COMP_STREAMESTIMATE_STATIONS).getData(), (System.Collections.IList)getComponentForComponentType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_MONTHLY).getData(), (System.Collections.IList)getComponentForComponentType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_DAILY).getData());
+
+			totalReadTime.stop();
+			Message.printStatus(1, routine, "Total time to read StateMod files is " + StringUtil.formatString(totalReadTime.getSeconds(),"%.3f") + " seconds");
+			totalReadTime.start();
+
+			// Read the generalized network...
+
+			Message.printStatus(1, routine, "Reading generalized network.");
+
+			try
+			{
+				fn = response_props.getValue("Network");
+				// Always set the file name...
+				comp = getComponentForComponentType(COMP_NETWORK);
+				if ((comp != null) && (!string.ReferenceEquals(fn, null)))
+				{
+					comp.setDataFileName(fn);
+				}
+				// Read the data...
+				if ((!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+				{
+					readTime.clear();
+					readTime.start();
+					fn = getDataFilePathAbsolute(fn);
+					readStateModFile_Announce1(comp);
+					StateMod_NodeNetwork network = (StateMod_NodeNetwork)StateMod_NodeNetwork.readStateModNetworkFile(fn, null, true);
+					comp.setData(network);
+					comp.setVisible(true);
+				}
+			}
+			catch (Exception e)
+			{
+				Message.printWarning(1, routine, "Unexpected error reading network file:\n\"" + fn + warningEndString + " (See log file for more on error:" + e + ")");
+				Message.printWarning(3, routine, e);
+				comp.setErrorReadingInputFile(true);
+			}
+			finally
+			{
+				comp.setDirty(false);
+				readTime.stop();
+				readStateModFile_Announce2(comp, readTime.getSeconds());
+			}
+		}
+		catch (Exception e)
+		{
+			// Main catch for all reads.
+			string message = "Unexpected error during read (" + e + ") - please contact support.";
+			Message.printStatus(1, routine, message);
+			Message.printWarning(3, routine, e);
+			// TODO Just rethrow for now
+			throw new IOException(message);
+		}
+
+		// Check the filenames for 8.3.  This limitation may be removed at some point...
+		// TODO - may move this to the front again, but only if the response
+		// file is read up front for the check and then reading continues as per the above logic.
+
+	/* TODO 
+		if (	!checkComponentFilenames(files_from_response, 1) &&
+			useGUI && (parent != null) ) {
+			Message.printWarning ( 1, routine, "StateMod may not run." );
+		}
+	*/
+
+		// Set component visibility based on the the control information...
+
+		checkComponentVisibility();
+
+		totalReadTime.stop();
+		string msg = "Total time to read all files is "
+			+ StringUtil.formatString(totalReadTime.getSeconds(),"%.3f") + " seconds";
+		Message.printStatus(1, routine, msg);
+		sendProcessListenerMessage(StateMod_GUIUtil.STATUS_READ_COMPLETE, msg);
+		setDirty(COMP_CONTROL, false);
+
+		readTime = null;
+		totalReadTime = null;
+		// TODO - uncomment for debugging
+		//Message.printStatus ( 2, routine,
+		//		"SAMX - After reading all files, control dirty =" +
+		//		getComponentForComponentType(
+		//		COMP_CONTROL).isDirty() );
+		//Message.printStatus ( 2, routine, super.toString () );
+	}
+
+	/// <summary>
+	/// This method is a helper routine to readStateModFile().  It calls
+	/// Message.printStatus() with the message that a particular file is being read,
+	/// including path.  Then it prints a similar, but shorter,
+	/// message to the status bar.  If there is an error with the file (not specified,
+	/// does not exist, etc.), then an Exception is thrown.  There are many StateMod
+	/// files and therefore the same basic checks are done many times. </summary>
+	/// <param name="comp"> Data set component that is being read. </param>
+	/// <exception cref="if"> there is a basic error with the file not being found, etc. </exception>
+//JAVA TO C# CONVERTER WARNING: Method 'throws' clauses are not available in .NET:
+//ORIGINAL LINE: private void readStateModFile_Announce1(RTi.Util.IO.DataSetComponent comp) throws Exception
+	private void readStateModFile_Announce1(DataSetComponent comp)
+	{
+		string fn = getDataFilePathAbsolute(comp);
+		string description = comp.getComponentName();
+
+		if ((string.ReferenceEquals(fn, null)) || (fn.Length == 0))
+		{
+			throw new Exception(description + " file name unavailable.");
+		}
+		// TODO - need to know whether this is an error that the user should acknowlege...
+		if (!IOUtil.fileExists(fn))
+		{
+			throw new Exception(description + " file \"" + fn + "\" does not exist.");
+		}
+		if (!IOUtil.fileReadable(fn))
+		{
+			throw new Exception(description + " file \"" + fn + "\" not readable.");
+		}
+
+		string msg = "Reading " + description + " data from \"" + fn + "\"";
+		// The status message is printed becauset process listeners may not be registered.
+		Message.printStatus(1, "StateMod_DataSet.readInputAnnounce1", msg);
+		sendProcessListenerMessage(StateMod_GUIUtil.STATUS_READ_START, msg);
+	}
+
+	/// <summary>
+	/// This method is a helper routine to readStateModFile().  It calls
+	/// Message.printStatus() with the message that a file has been read successively.
+	/// Then it prints a similar, but shorter, message to the status bar. </summary>
+	/// <param name="comp"> Component being read. </param>
+	/// <param name="seconds"> Number of seconds to read. </param>
+	private void readStateModFile_Announce2(DataSetComponent comp, double seconds)
+	{
+		string routine = "StateMod_DataSet.readInputAnnounce2";
+		string fn = getDataFilePathAbsolute(comp);
+		string description = comp.getComponentName();
+
+		// The status message is printed becauset process listeners may not be registered.
+		string msg = description + " data read from \"" + fn + "\" in "
+			+ StringUtil.formatString(seconds,"%.3f") + " seconds";
+		Message.printStatus(1, routine, msg);
+		sendProcessListenerMessage(StateMod_GUIUtil.STATUS_READ_COMPLETE,msg);
+	}
+
+	/// <summary>
+	/// Remove a ProcessListener that was previously added with addProcessListener(). </summary>
+	/// <param name="p"> ProcessListener to remove. </param>
+	public virtual void removeProcessListener(ProcessListener p)
+	{
+		if (__processListeners == null)
+		{
+			return;
+		}
+		__processListeners.Remove(p);
+	}
+
+	/// <summary>
+	/// Performs the check file setup and calls code to check component.  Also sets
+	/// the check file to the list in the GUI.  If problems are encountered when
+	/// running data checks are added to the check file. </summary>
+	/// <param name="type"> StateModComponent type. </param>
+	public virtual string runComponentChecks(int type, string fname, string commands, string header)
+	{
+		string check_file = "";
+		CheckFile chk = new CheckFile(fname, commands);
+		chk.addToHeader(header);
+		StateMod_ComponentDataCheck check = new StateMod_ComponentDataCheck(type, chk, this);
+		// Run the data checks for the component and retrieve the finalized check file
+		CheckFile final_check = check.checkComponentType(null);
+		try
+		{
+			final_check.finalizeCheckFile();
+			check_file = final_check.ToString();
+		}
+		catch (Exception e)
+		{
+			Message.printWarning(2, "StateDMI_Processor.runComponentChecks", "Check file: " + final_check.ToString() + " couldn't be finalized.");
+			Message.printWarning(3, "StateDMI_Processor.runComponentChecks",e);
+		}
+		return check_file;
+	}
+
+	/// <summary>
+	/// Write a data set to an opened XML file.  This is experimental code. </summary>
+	/// <param name="data"> a StateMod_DataSet to write. </param>
+	/// <param name="out"> output PrintWriter </param>
+	/// <exception cref="IOException"> if an error occurs. </exception>
+//JAVA TO C# CONVERTER WARNING: Method 'throws' clauses are not available in .NET:
+//ORIGINAL LINE: private void writeDataSetToXMLFile(StateMod_DataSet dataset, java.io.PrintWriter out) throws java.io.IOException
+	private void writeDataSetToXMLFile(StateMod_DataSet dataset, PrintWriter @out)
+	{
+		string comment = "#>";
+		DataSetComponent comp = null;
+		// start xml tag...
+		@out.println("<!--");
+		@out.println(comment);
+		@out.println(comment + "  StateMod Data Set(XML)File");
+		@out.println(comment);
+		@out.println(comment + "EndHeader");
+		@out.println("-->");
+
+		@out.println("<StateMod_DataSet " + "Type=\"" + StateMod_DataSet.lookupTypeName(dataset.getDataSetType()) + "\"" + "BaseName=\"" + dataset.getBaseName() + "\">");
+
+		int num = 0;
+		System.Collections.IList data_Vector = dataset.getComponents();
+		if (data_Vector != null)
+		{
+			num = data_Vector.Count;
+		}
+
+		string indent1 = "  ";
+		string indent2 = indent1 + indent1;
+
+		for (int i = 0; i < num; i++)
+		{
+			comp = (DataSetComponent)data_Vector[i];
+			if (comp == null)
+			{
+				continue;
+			}
+
+			@out.println(indent1 + "<DataSetComponent");
+			@out.println(indent2 + "Type=\"" + dataset.lookupComponentName(comp.getComponentType()) + "\"");
+			@out.println(indent2 + "DataFile=\"" + comp.getDataFileName() + "\"");
+			@out.println(indent2 + "ListFile=\"" + comp.getListFileName() + "\"");
+			@out.println(indent2 + "CommandsFile=\"" + comp.getCommandsFileName() + "\"");
+			@out.println(indent2 + ">");
+			@out.println(indent1 + "</DataSetComponent>");
+		}
+
+		@out.println("</StateMod_DataSet>");
+	}
+
+	/// <summary>
+	/// Write the data set to an XML file.  The filename is adjusted to the 
+	/// working directory if necessary using IOUtil.getPathUsingWorkingDir().
+	/// This is experimental code. </summary>
+	/// <param name="filename_prev"> the name of the previous version of the file(for
+	/// processing headers).  Specify as null if no previous file is available. </param>
+	/// <param name="filename"> the name of the file to write. </param>
+	/// <param name="dataset"> the dataset </param>
+	/// <param name="new_comments"> Comments to add to the top of the file.  Specify as null if no comments are available. </param>
+	/// <exception cref="IOException"> if there is an error writing the file. </exception>
+//JAVA TO C# CONVERTER WARNING: Method 'throws' clauses are not available in .NET:
+//ORIGINAL LINE: public void writeXMLFile(String filename_prev, String filename, StateMod_DataSet dataset, java.util.List<String> new_comments) throws java.io.IOException
+	public virtual void writeXMLFile(string filename_prev, string filename, StateMod_DataSet dataset, IList<string> new_comments)
+	{
+		IList<string> commentStr = new List<object>();
+		commentStr.Add("#");
+		IList<string> ignoreCommentStr = new List<object>();
+		ignoreCommentStr.Add("#>");
+		PrintWriter @out = null;
+		string full_filename_prev = IOUtil.getPathUsingWorkingDir(filename_prev);
+		if (!StringUtil.endsWithIgnoreCase(filename, ".xml"))
+		{
+			filename = filename + ".xml";
+		}
+
+		string full_filename = IOUtil.getPathUsingWorkingDir(filename);
+		@out = IOUtil.processFileHeaders(full_filename_prev, full_filename, new_comments, commentStr, ignoreCommentStr, 0);
+		if (@out == null)
+		{
+			throw new IOException("Error writing to \"" + full_filename + "\"");
+		}
+
+		writeDataSetToXMLFile(dataset, @out);
+		@out.flush();
+		@out.close();
+	}
+
+	/// <summary>
+	/// Add a process listener.  This is used to notify other code (e.g., the StateMod
+	/// GUI as progress is made reading the data set). </summary>
+	/// <param name="p"> ProcessListener to remove. </param>
+	public virtual void addProcessListener(ProcessListener p)
+	{
+		if (__processListeners == null)
+		{
+			__processListeners = new List<object>();
+		}
+		__processListeners.Add(p);
+	}
+
+	/// <summary>
+	/// Send a message to ProcessListener that have been registered with this object.
+	/// This is usually a main application that is giving feedback to a user via the messages.
+	/// </summary>
+	public virtual void sendProcessListenerMessage(int status, string message)
+	{
+		int size = 0;
+		if (__processListeners != null)
+		{
+			size = __processListeners.Count;
+		}
+
+		ProcessListener p = null;
+		for (int i = 0; i < size; i++)
+		{
+			p = __processListeners[i];
+			p.processStatus(status, message);
+		}
+	}
+
+	/// <summary>
+	/// Set detailed call water right ID </summary>
+	/// <param name="ccall"> __ccall to set </param>
+	public virtual void setCcall(string ccall)
+	{
+		if ((!string.ReferenceEquals(ccall, null)) && !ccall.Equals(__ccall))
+		{
+			__ccall = ccall;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the factor for converting reservoir content data to AF </summary>
+	/// <param name="cfacto"> factor </param>
+	public virtual void setCfacto(double cfacto)
+	{
+		if (cfacto != __cfacto)
+		{
+			__cfacto = cfacto;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the factor for converting reservoir content data to AF </summary>
+	/// <param name="cfacto"> factor </param>
+	public virtual void setCfacto(double? cfacto)
+	{
+		setCfacto(cfacto.Value);
+	}
+
+	/// <summary>
+	/// Set the factor for converting reservoir content data to AF </summary>
+	/// <param name="cfacto"> factor </param>
+	public virtual void setCfacto(string cfacto)
+	{
+		if (!string.ReferenceEquals(cfacto, null))
+		{
+			setCfacto(StringUtil.atod(cfacto.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the calendar/water/irrigation year </summary>
+	/// <param name="cyrl"> year type </param>
+	public virtual void setCyrl(int? cyrl)
+	{
+		setCyrl(cyrl.Value);
+	}
+
+	/// <summary>
+	/// Set the calendar/water/irrigation year </summary>
+	/// <param name="cyrl"> year type </param>
+	public virtual void setCyrl(YearType cyrl)
+	{
+		if (cyrl != __cyrl)
+		{
+			__cyrl = cyrl;
+			setDirty(COMP_CONTROL, true);
+		}
+		if (cyrl != YearType.CALENDAR && cyrl != YearType.WATER && cyrl != YearType.NOV_TO_OCT)
+		{
+			Message.printWarning(1, "StateMod_DataSet.setCyrl", "Setting year type using invalid value(" + cyrl + "); use SM_CYR, SM_WYR, or SM_IYR");
+		}
+	}
+
+	/// <summary>
+	/// Set the calendar/water/irrigation year </summary>
+	/// <param name="cyrl"> year type </param>
+	public virtual void setCyrl(string cyrl)
+	{
+		if (string.ReferenceEquals(cyrl, null))
+		{
+			return;
+		}
+		// expecting "CYR", "WYR", "IYR"
+		cyrl = cyrl.Trim();
+		if (cyrl.Equals("CYR", StringComparison.OrdinalIgnoreCase))
+		{
+			setCyrl(YearType.CALENDAR);
+		}
+		else if (cyrl.Equals("WYR", StringComparison.OrdinalIgnoreCase))
+		{
+			setCyrl(YearType.WATER);
+		}
+		else if (cyrl.Equals("IYR", StringComparison.OrdinalIgnoreCase))
+		{
+			setCyrl(YearType.NOV_TO_OCT);
+		}
+		else
+		{
+			Message.printWarning(1, "StateMod_Control.setCyrl", "Setting year type using invalid value(" + cyrl + "); use \"CYR\", \"WYR\", or \"IYR\"");
+			setCyrl(YearType.CALENDAR);
+		}
+	}
+
+	/// <summary>
+	/// Set the divisor for diversion data units </summary>
+	/// <param name="dfacto"> factor </param>
+	public virtual void setDfacto(double dfacto)
+	{
+		if (dfacto != __dfacto)
+		{
+			__dfacto = dfacto;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the divisor for diversion data units </summary>
+	/// <param name="dfacto"> factor </param>
+	public virtual void setDfacto(double? dfacto)
+	{
+		setDfacto(dfacto.Value);
+	}
+
+	/// <summary>
+	/// Set the divisor for diversion data units </summary>
+	/// <param name="dfacto"> factor </param>
+	public virtual void setDfacto(string dfacto)
+	{
+		if (!string.ReferenceEquals(dfacto, null))
+		{
+			setDfacto(StringUtil.atod(dfacto.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the factor for converting evaporation data to FT </summary>
+	/// <param name="efacto"> factor </param>
+	public virtual void setEfacto(double efacto)
+	{
+		if (efacto != __efacto)
+		{
+			__efacto = efacto;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the factor for converting evaporation data to FT </summary>
+	/// <param name="efacto"> factor </param>
+	public virtual void setEfacto(double? efacto)
+	{
+		setEfacto(efacto.Value);
+	}
+
+	/// <summary>
+	/// Set the factor for converting evaporation data to FT </summary>
+	/// <param name="efacto"> factor </param>
+	public virtual void setEfacto(string efacto)
+	{
+		if (!string.ReferenceEquals(efacto, null))
+		{
+			setEfacto(StringUtil.atod(efacto.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the divisor for instreamflow data units </summary>
+	/// <param name="ffacto"> factor </param>
+	public virtual void setFfacto(double ffacto)
+	{
+		if (ffacto != __ffacto)
+		{
+			__ffacto = ffacto;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the divisor for instreamflow data units </summary>
+	/// <param name="ffacto"> factor </param>
+	public virtual void setFfacto(double? ffacto)
+	{
+		setFfacto(ffacto.Value);
+	}
+
+	/// <summary>
+	/// Set the divisor for instreamflow data units </summary>
+	/// <param name="ffacto"> factor </param>
+	public virtual void setFfacto(string ffacto)
+	{
+		if (!string.ReferenceEquals(ffacto, null))
+		{
+			setFfacto(StringUtil.atod(ffacto.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set factor for converting CFS to AF/Day (1.9835). </summary>
+	/// <param name="factor"> factor </param>
+	public virtual void setFactor(double factor)
+	{
+		if (factor != __factor)
+		{
+			__factor = factor;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set factor for converting CFS to AF/Day (1.9835). </summary>
+	/// <param name="factor"> factor </param>
+	public virtual void setFactor(double? factor)
+	{
+		setFactor(factor.Value);
+	}
+
+	/// <summary>
+	/// Set factor for converting CFS to AF/Day (1.9835). </summary>
+	/// <param name="factor"> factor </param>
+	public virtual void setFactor(string factor)
+	{
+		if (!string.ReferenceEquals(factor, null))
+		{
+			setFactor(StringUtil.atod(factor.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set gwmaxrc
+	/// </summary>
+	public virtual void setGwmaxrc(double gwmaxrc)
+	{
+		if (gwmaxrc != __gwmaxrc)
+		{
+			__gwmaxrc = gwmaxrc;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set gwmaxrc
+	/// </summary>
+	public virtual void setGwmaxrc(double? gwmaxrc)
+	{
+		setGwmaxrc(gwmaxrc.Value);
+	}
+
+	/// <summary>
+	/// Set gwmaxrc
+	/// </summary>
+	public virtual void setGwmaxrc(string gwmaxrc)
+	{
+		if (!string.ReferenceEquals(gwmaxrc, null))
+		{
+			setGwmaxrc(StringUtil.atod(gwmaxrc.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set first line of heading </summary>
+	/// <param name="heading1"> first line of text in file </param>
+	public virtual void setHeading1(string heading1)
+	{
+		if ((!string.ReferenceEquals(heading1, null)) && !heading1.Equals(__heading1))
+		{
+			__heading1 = heading1;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set second line of heading. </summary>
+	/// <param name="heading2"> second line of text in file. </param>
+	public virtual void setHeading2(string heading2)
+	{
+		if ((!string.ReferenceEquals(heading2, null)) && !heading2.Equals(__heading2))
+		{
+			__heading2 = heading2;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for detailed call data
+	/// </summary>
+	public virtual void setIcall(int icall)
+	{
+		if (icall != __icall)
+		{
+			__icall = icall;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for detailed call data
+	/// </summary>
+	public virtual void setIcall(int? icall)
+	{
+		setIcall(icall.Value);
+	}
+
+	/// <summary>
+	/// Set the switch for detailed call data
+	/// </summary>
+	public virtual void setIcall(string icall)
+	{
+		if (!string.ReferenceEquals(icall, null))
+		{
+			setIcall(StringUtil.atoi(icall.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for detailed printout. </summary>
+	/// <param name="ichk"> switch </param>
+	public virtual void setIchk(int ichk)
+	{
+		if (ichk != __ichk)
+		{
+			__ichk = ichk;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for detailed printout
+	/// </summary>
+	public virtual void setIchk(int? ichk)
+	{
+		setIchk(ichk.Value);
+	}
+
+	/// <summary>
+	/// Set the switch for detailed printout
+	/// </summary>
+	public virtual void setIchk(string ichk)
+	{
+		if (!string.ReferenceEquals(ichk, null))
+		{
+			setIchk(StringUtil.atoi(ichk.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for demand type </summary>
+	/// <param name="icondem"> __icondem to set </param>
+	public virtual void setIcondem(int icondem)
+	{
+		if (icondem != __icondem)
+		{
+			__icondem = icondem;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for demand type </summary>
+	/// <param name="icondem"> __icondem to set </param>
+	public virtual void setIcondem(int? icondem)
+	{
+		setIcondem(icondem.Value);
+	}
+
+	/// <summary>
+	/// Set the switch for demand type </summary>
+	/// <param name="icondem"> __icondem to set </param>
+	public virtual void setIcondem(string icondem)
+	{
+		if (!string.ReferenceEquals(icondem, null))
+		{
+			setIcondem(StringUtil.atoi(icondem.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for daily calculations
+	/// </summary>
+	public virtual void setIday(int iday)
+	{
+		if (iday != __iday)
+		{
+			__iday = iday;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for daily calculations
+	/// </summary>
+	public virtual void setIday(int? iday)
+	{
+		setIday(iday.Value);
+	}
+
+	/// <summary>
+	/// Set the switch for daily calculations
+	/// </summary>
+	public virtual void setIday(string iday)
+	{
+		if (!string.ReferenceEquals(iday, null))
+		{
+			setIday(StringUtil.atoi(iday.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for IWR. </summary>
+	/// <param name="ieffmax"> switch </param>
+	public virtual void setIeffmax(int ieffmax)
+	{
+		if (ieffmax != __ieffmax)
+		{
+			__ieffmax = ieffmax;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for IWR.
+	/// </summary>
+	public virtual void setIeffmax(int? ieffmax)
+	{
+		setIeffmax(ieffmax.Value);
+	}
+
+	/// <summary>
+	/// Set the switch for IWR.
+	/// </summary>
+	public virtual void setIeffmax(string ieffmax)
+	{
+		if (!string.ReferenceEquals(ieffmax, null))
+		{
+			setIeffmax(StringUtil.atoi(ieffmax.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set max number of entries in a delay pattern. </summary>
+	/// <param name="interv"> number of entries </param>
+	public virtual void setInterv(int interv)
+	{
+		if (interv != __interv)
+		{
+			__interv = interv;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set max number of entries in a delay pattern. </summary>
+	/// <param name="interv"> number of entries </param>
+	public virtual void setInterv(int? interv)
+	{
+		setInterv(interv.Value);
+	}
+
+	/// <summary>
+	/// Set max number of entries in a delay pattern. </summary>
+	/// <param name="interv"> number of entries </param>
+	public virtual void setInterv(string interv)
+	{
+		if (!string.ReferenceEquals(interv, null))
+		{
+			setInterv(StringUtil.atoi(interv.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set streamflow type.  Use SM_TOTAL or SM_GAINS. </summary>
+	/// <param name="iopflo"> streamflow type </param>
+	public virtual void setIopflo(int iopflo)
+	{
+		if (iopflo != __iopflo)
+		{
+			__iopflo = iopflo;
+			setDirty(COMP_CONTROL, true);
+		}
+
+		if (iopflo != SM_TOT && iopflo != SM_GAINS)
+		{
+			Message.printWarning(1, "StateMod_Control.setIopflo", "Setting iopflo using invalid value(" + iopflo + "); use SM_TOT or SM_GAINS");
+		}
+	}
+
+	/// <summary>
+	/// Set streamflow type. </summary>
+	/// <param name="iopflo"> streamflow type </param>
+	public virtual void setIopflo(int? iopflo)
+	{
+		setIopflo(iopflo.Value);
+	}
+
+	/// <summary>
+	/// Set streamflow type. </summary>
+	/// <param name="iopflo"> streamflow type </param>
+	public virtual void setIopflo(string iopflo)
+	{
+		if (!string.ReferenceEquals(iopflo, null))
+		{
+			setIopflo(StringUtil.atoi(iopflo.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for instream flow reach approach
+	/// </summary>
+	public virtual void setIreach(int ireach)
+	{
+		if (ireach != __ireach)
+		{
+			__ireach = ireach;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for instream flow reach approach
+	/// </summary>
+	public virtual void setIreach(int? ireach)
+	{
+		setIreach(ireach.Value);
+	}
+
+	/// <summary>
+	/// Set the switch for instream flow reach approach
+	/// </summary>
+	public virtual void setIreach(string ireach)
+	{
+		if (!string.ReferenceEquals(ireach, null))
+		{
+			setIreach(StringUtil.atoi(ireach.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for reoperation control.
+	/// </summary>
+	public virtual void setIreopx(int ireopx)
+	{
+		if (ireopx != __ireopx)
+		{
+			__ireopx = ireopx;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for reoperation control
+	/// </summary>
+	public virtual void setIreopx(int? ireopx)
+	{
+		setIreopx(ireopx.Value);
+	}
+
+	/// <summary>
+	/// Set the switch for reoperation control
+	/// </summary>
+	public virtual void setIreopx(string ireopx)
+	{
+		if (!string.ReferenceEquals(ireopx, null))
+		{
+			setIreopx(StringUtil.atoi(ireopx.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set switch for output.  Use SM_CFS, SM_ACFT, SM_KACFT. </summary>
+	/// <param name="iresop"> switch </param>
+	public virtual void setIresop(int iresop)
+	{
+		if (iresop != __iresop)
+		{
+			__iresop = iresop;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set switch for output. </summary>
+	/// <param name="iresop"> switch </param>
+	public virtual void setIresop(int? iresop)
+	{
+		setIresop(iresop.Value);
+	}
+
+	/// <summary>
+	/// Set switch for output. </summary>
+	/// <param name="iresop"> switch </param>
+	public virtual void setIresop(string iresop)
+	{
+		if (!string.ReferenceEquals(iresop, null))
+		{
+			setIresop(StringUtil.atoi(iresop.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for significant figures. </summary>
+	/// <param name="isig"> switch </param>
+	public virtual void setIsig(int isig)
+	{
+		if (isig != __isig)
+		{
+			__isig = isig;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for significant figures.
+	/// </summary>
+	public virtual void setIsig(int? isig)
+	{
+		setIsig(isig.Value);
+	}
+
+	/// <summary>
+	/// Set the switch for significant figures.
+	/// </summary>
+	public virtual void setIsig(string isig)
+	{
+		if (!string.ReferenceEquals(isig, null))
+		{
+			setIsig(StringUtil.atoi(isig.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for SJRIP. </summary>
+	/// <param name="isjrip"> switch </param>
+	public virtual void setIsjrip(int isjrip)
+	{
+		if (isjrip != __isjrip)
+		{
+			__isjrip = isjrip;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for SJRIP.
+	/// </summary>
+	public virtual void setIsjrip(int? isjrip)
+	{
+		setIsjrip(isjrip.Value);
+	}
+
+	/// <summary>
+	/// Set the switch for SJRIP.
+	/// </summary>
+	public virtual void setIsjrip(string isjrip)
+	{
+		if (!string.ReferenceEquals(isjrip, null))
+		{
+			setIsjrip(StringUtil.atoi(isjrip.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for sprinklers. </summary>
+	/// <param name="isprink"> switch </param>
+	public virtual void setIsprink(int isprink)
+	{
+		if (isprink != __isprink)
+		{
+			__isprink = isprink;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for sprinklers.
+	/// </summary>
+	public virtual void setIsprink(int? isprink)
+	{
+		setIsprink(isprink.Value);
+	}
+
+	/// <summary>
+	/// Set the switch for sprinklers.
+	/// </summary>
+	public virtual void setIsprink(string isprink)
+	{
+		if (!string.ReferenceEquals(isprink, null))
+		{
+			setIsprink(StringUtil.atoi(isprink.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for the ipy/tsp file. </summary>
+	/// <param name="itsfile"> switch </param>
+	public virtual void setItsfile(int itsfile)
+	{
+		if (itsfile != __itsfile)
+		{
+			__itsfile = itsfile;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for the ipy/tsp file.
+	/// </summary>
+	public virtual void setItsfile(int? itsfile)
+	{
+		setItsfile(itsfile.Value);
+	}
+
+	/// <summary>
+	/// Set the switch for the ipy/tsp file.
+	/// </summary>
+	public virtual void setItsfile(string itsfile)
+	{
+		if (!string.ReferenceEquals(itsfile, null))
+		{
+			setItsfile(StringUtil.atoi(itsfile.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for well calculations
+	/// </summary>
+	public virtual void setIwell(int iwell)
+	{
+		if (iwell != __iwell)
+		{
+			__iwell = iwell;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the switch for well calculations
+	/// </summary>
+	public virtual void setIwell(int? iwell)
+	{
+		setIwell(iwell.Value);
+	}
+
+	/// <summary>
+	/// Set the switch for well calculations
+	/// </summary>
+	public virtual void setIwell(string iwell)
+	{
+		if (!string.ReferenceEquals(iwell, null))
+		{
+			setIwell(StringUtil.atoi(iwell.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set ending year of the simulation. </summary>
+	/// <param name="iyend"> ending year </param>
+	public virtual void setIyend(int iyend)
+	{
+		if (iyend != __iyend)
+		{
+			__iyend = iyend;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set ending year of the simulation. </summary>
+	/// <param name="iyend"> ending year </param>
+	public virtual void setIyend(int? iyend)
+	{
+		setIyend(iyend.Value);
+	}
+
+	/// <summary>
+	/// Set ending year of the simulation. </summary>
+	/// <param name="iyend"> ending year </param>
+	public virtual void setIyend(string iyend)
+	{
+		if (!string.ReferenceEquals(iyend, null))
+		{
+			setIyend(StringUtil.atoi(iyend.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set starting year of the simulation. </summary>
+	/// <param name="iystr"> starting year </param>
+	public virtual void setIystr(int iystr)
+	{
+		if (iystr != __iystr)
+		{
+			__iystr = iystr;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set starting year of the simulation. </summary>
+	/// <param name="iystr"> starting year </param>
+	public virtual void setIystr(int? iystr)
+	{
+		setIystr(iystr.Value);
+	}
+
+	/// <summary>
+	/// Set starting year of the simulation. </summary>
+	/// <param name="iystr"> starting year </param>
+	public virtual void setIystr(string iystr)
+	{
+		if (!string.ReferenceEquals(iystr, null))
+		{
+			setIystr(StringUtil.atoi(iystr.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set type of evaporation data. Use SM_MONTHLY or SM_AVERAGE. </summary>
+	/// <param name="moneva"> type of evaporation data </param>
+	public virtual void setMoneva(int moneva)
+	{
+		if (moneva != __moneva)
+		{
+			__moneva = moneva;
+			setDirty(COMP_CONTROL, true);
+		}
+
+		if (moneva != SM_MONTHLY && moneva != SM_AVERAGE)
+		{
+			Message.printWarning(1, "StateMod_Control.setMoneva", "Setting moneva using invalid value(" + moneva + "); use SM_MONTHLY or SM_AVERAGE");
+		}
+	}
+
+	/// <summary>
+	/// Set type of evaporation data. </summary>
+	/// <param name="moneva"> type of evaporation data </param>
+	public virtual void setMoneva(int? moneva)
+	{
+		setMoneva(moneva.Value);
+	}
+
+	/// <summary>
+	/// Set type of evaporation data. </summary>
+	/// <param name="moneva"> type of evaporation data </param>
+	public virtual void setMoneva(string moneva)
+	{
+		if (!string.ReferenceEquals(moneva, null))
+		{
+			setMoneva(StringUtil.atoi(moneva.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set number of evaporation stations. </summary>
+	/// <param name="numeva"> number of stations </param>
+	public virtual void setNumeva(int numeva)
+	{
+		if (numeva != __numeva)
+		{
+			__numeva = numeva;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set number of evaporation stations. </summary>
+	/// <param name="numeva"> number of stations </param>
+	public virtual void setNumeva(int? numeva)
+	{
+		setNumeva(numeva.Value);
+	}
+
+	/// <summary>
+	/// Set number of evaporation stations. </summary>
+	/// <param name="numeva"> number of stations </param>
+	public virtual void setNumeva(string numeva)
+	{
+		if (!string.ReferenceEquals(numeva, null))
+		{
+			setNumeva(StringUtil.atoi(numeva.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set number of precipitation stations. </summary>
+	/// <param name="numpre"> number of stations </param>
+	public virtual void setNumpre(int numpre)
+	{
+		if (numpre != __numpre)
+		{
+			__numpre = numpre;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set number of precipitation stations. </summary>
+	/// <param name="numpre"> number of stations </param>
+	public virtual void setNumpre(int? numpre)
+	{
+		setNumpre(numpre.Value);
+	}
+
+	/// <summary>
+	/// Set number of precipitation stations. </summary>
+	/// <param name="numpre"> number of stations </param>
+	public virtual void setNumpre(string numpre)
+	{
+		if (!string.ReferenceEquals(numpre, null))
+		{
+			setNumpre(StringUtil.atoi(numpre.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the factor for converting precipitation data to FT </summary>
+	/// <param name="pfacto"> factor </param>
+	public virtual void setPfacto(double pfacto)
+	{
+		if (pfacto != __pfacto)
+		{
+			__pfacto = pfacto;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set the factor for converting precipitation data to FT </summary>
+	/// <param name="pfacto"> factor </param>
+	public virtual void setPfacto(double? pfacto)
+	{
+		setPfacto(pfacto.Value);
+	}
+
+	/// <summary>
+	/// Set the factor for converting precipitation data to FT </summary>
+	/// <param name="pfacto"> factor </param>
+	public virtual void setPfacto(string pfacto)
+	{
+		if (!string.ReferenceEquals(pfacto, null))
+		{
+			setPfacto(StringUtil.atod(pfacto.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set the divisor for streamflow data units. </summary>
+	/// <param name="rfacto"> factor </param>
+	public virtual void setRfacto(double rfacto)
+	{
+		if (rfacto != __rfacto)
+		{
+			__rfacto = rfacto;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+	/// <summary>
+	/// Set the divisor for streamflow data units. </summary>
+	/// <param name="rfacto"> factor </param>
+	public virtual void setRfacto(double? rfacto)
+	{
+		setRfacto(rfacto.Value);
+	}
+
+	/// <summary>
+	/// Set the divisor for streamflow data units. </summary>
+	/// <param name="rfacto"> factor </param>
+	public virtual void setRfacto(string rfacto)
+	{
+		if (!string.ReferenceEquals(rfacto, null))
+		{
+			setRfacto(StringUtil.atod(rfacto.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Set soild
+	/// </summary>
+	public virtual void setSoild(double soild)
+	{
+		if (soild != __soild)
+		{
+			__soild = soild;
+			setDirty(COMP_CONTROL, true);
+		}
+	}
+
+	/// <summary>
+	/// Set soild
+	/// </summary>
+	public virtual void setSoild(double? soild)
+	{
+		setSoild(soild.Value);
+	}
+
+	/// <summary>
+	/// Set soild
+	/// </summary>
+	public virtual void setSoild(string soild)
+	{
+		if (!string.ReferenceEquals(soild, null))
+		{
+			setSoild(StringUtil.atod(soild.Trim()));
+		}
+	}
+
+	/// <summary>
+	/// Return a string representation of the data set definition information, useful for troubleshooting.
+	/// </summary>
+	private string toStringDefinitions()
+	{
+		StringBuilder b = new StringBuilder();
+		DataSetComponent comp = null;
+		string nl = System.getProperty("line.separator");
+		for (int i = 0; i < __component_names.Length; i++)
+		{
+			comp = getComponentForComponentType(i);
+			b.Append("[" + i + "] Name=\"" + __component_names[i] + "\" Group=" + __component_group_assignments[i] + " RspProperty=\"" + __statemod_file_properties[i] + "\" Filename=\"" + comp.getDataFileName() + "\" Ext=\"" + __component_file_extensions[i] + "\" TSType=\"" + __component_ts_data_types[i] + "\" TSInt=" + __component_ts_data_intervals[i] + " TSUnits=\"" + __component_ts_data_units[i] + "\"" + nl);
+		}
+		return b.ToString();
+	}
+
+	/// <summary>
+	/// Writes the new (updated) control file.
+	/// If an original file is specified, then the original header is carried into the new file. </summary>
+	/// <param name="dataset"> the dataset from which to write control settings. </param>
+	/// <param name="inputFile"> old file (used as input) </param>
+	/// <param name="outputFile"> new control file to create </param>
+	/// <param name="newcomments"> String array of new comments to add to the header of the file. </param>
+	/// <exception cref="Exception"> if an error occurs. </exception>
+//JAVA TO C# CONVERTER WARNING: Method 'throws' clauses are not available in .NET:
+//ORIGINAL LINE: public static void writeStateModControlFile(StateMod_DataSet dataset, String inputFile, String outputFile, java.util.List<String> newcomments) throws Exception
+	public static void writeStateModControlFile(StateMod_DataSet dataset, string inputFile, string outputFile, IList<string> newcomments)
+	{
+		PrintWriter @out = null;
+		IList<string> commentStr = new List<object>();
+		commentStr.Add("#");
+		IList<string> ignoreCommentStr = new List<object>();
+		ignoreCommentStr.Add("#>");
+		string routine = "writeControlFile";
+
+		Message.printStatus(1, routine, "Writing new control to file \"" + outputFile + "\" using \"" + inputFile + "\" header...");
+
+		try
+		{
+			// Process the header from the old file...
+			@out = IOUtil.processFileHeaders(inputFile, outputFile, newcomments, commentStr, ignoreCommentStr, 0);
+
+			// Now write the new control data...
+			string month_del = "   ";
+			string iline;
+			string cmnt = "#>";
+			string formatd = "%8d";
+			string formatf = "%8.4f";
+			string formatf1 = "%8.1f";
+			string formatf0 = "%8.0f";
+			string formats12 = "%-12.12s";
+			System.Collections.IList v = new List<object>(1);
+
+			if (dataset.getCyrl() == YearType.CALENDAR)
+			{
+				month_del = "CYR";
+			}
+			else if (dataset.getCyrl() == YearType.WATER)
+			{
+				month_del = "WYR";
+			}
+			else if (dataset.getCyrl() == YearType.NOV_TO_OCT)
+			{
+				month_del = "IYR";
+			}
+
+			@out.println(cmnt);
+			@out.println(cmnt + " StateMod Control file (see StateMod documentation)");
+			@out.println(cmnt);
+			@out.println(cmnt + " First 2 lines are headers(title, description)");
+			@out.println(cmnt + " Remaining lines use first 8 characters for values (12 for \"ccall\").");
+			@out.println(cmnt);
+			@out.println(cmnt + " As per historical use, comments are allowed to the right of values.");
+			@out.println(cmnt + " Lines starting with # also are treated as comments.");
+			@out.println(cmnt);
+			@out.println(dataset.getHeading1());
+			@out.println(dataset.getHeading2());
+
+			v.Add(new int?(dataset.getIystr()));
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : iystr   Starting year of simulation");
+
+			v[0] = new int?(dataset.getIyend());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : iyend   Ending year of simulation");
+
+			v[0] = new int?(dataset.getIresop());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : iresop  Output units (1=cfs,2=acft,3=KAF,4=cfs day and acft month,5=cms)");
+
+			v[0] = new int?(dataset.getMoneva());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : moneva  Type of evap/precip data (0=monthly, 1=average)");
+
+			v[0] = new int?(dataset.getIopflo());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : iopflo  Type of stream inflow (1=total, 2=gains)");
+
+			v[0] = new int?(dataset.getNumpre());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : numpre  Number of precipitation stations");
+
+			v[0] = new int?(dataset.getNumeva());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : numeva  Number of evaporation stations");
+
+			v[0] = new int?(dataset.getInterv());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : interv  Intervals in delay table (n=fixed, %;-1=var, %; -100=var, fraction)");
+
+			v[0] = new double?(dataset.getFactor());
+			iline = StringUtil.formatString(v, formatf);
+			@out.println(iline + "     : factor  Factor to convert cfs to acft/day (1.9835)");
+
+			v[0] = new double?(dataset.getRfacto());
+			iline = StringUtil.formatString(v, formatf);
+			@out.println(iline + "     : rfacto  Divisor for streamflow data (0 for data in cfs, 1.9835 for acft/month)");
+
+			v[0] = new double?(dataset.getDfacto());
+			iline = StringUtil.formatString(v, formatf);
+			@out.println(iline + "     : dfacto  Divisor for diversion data (0 for data in cfs, 1.9835 for acft/month)");
+
+			v[0] = new double?(dataset.getFfacto());
+			iline = StringUtil.formatString(v, formatf);
+			@out.println(iline + "     : ffacto  Divisor for instream flow data (0 for data in cfs, 1.9835 for acft/month)");
+
+			v[0] = new double?(dataset.getCfacto());
+			iline = StringUtil.formatString(v, formatf);
+			@out.println(iline + "     : cfacto  Factor to convert reservoir content to acft");
+
+			v[0] = new double?(dataset.getEfacto());
+			iline = StringUtil.formatString(v, formatf);
+			@out.println(iline + "     : efacto  Factor to convert evaporation data to feet");
+
+			v[0] = new double?(dataset.getPfacto());
+			iline = StringUtil.formatString(v, formatf);
+			@out.println(iline + "     : pfacto  Factor to convert precipitation data to feet");
+
+			@out.println("  " + month_del + "        : cyr1    Year type (a5, all caps, right justified: CYR, WYR, or IYR)");
+
+			v[0] = new int?(dataset.getIcondem());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : icondem Demand type (1=Historical Demand,2=Historical Sum," + "3=Structure Demand,4=Supply Demand,5=Decreed Demand)");
+
+			v[0] = new int?(dataset.getIchk());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : ichk    Detailed print (0=off,1=net,4=calls,5=dem,6=day,7=ret," + "91=well,92=soil,-NodeId,see documentation)");
+
+			v[0] = new int?(dataset.getIreopx());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : ireopx  Re-operation switch (0=re-operate,1=no re-operation," + "-10=reoperate for releases>10 acft/month)");
+
+			v[0] = new int?(dataset.getIreach());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : ireach  Instream flow approach (0=no reach,1=reach approach," + "2=0+monthly demands,3=1+monthly demands)");
+
+			v[0] = new int?(dataset.getIcall());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : icall   Detailed call data (0=no, 1=yes)");
+
+			v[0] = dataset.getCcall();
+			iline = StringUtil.formatString(v, formats12);
+			@out.println(iline + " : ccall   Detailed call water right ID (if icall != 0)");
+
+			v[0] = new int?(dataset.getIday());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : iday    Daily calculations (0=monthly,1=daily)");
+
+			v[0] = new int?(dataset.getIwell());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : iwell   Wells (-1=no but files in .rsp,0=no,1=well with no gwmaxrc," + "2=wells with gwmaxrc,3=wells with var gwmaxrc)");
+
+			v[0] = new double?(dataset.getGwmaxrc());
+			iline = StringUtil.formatString(v, formatf1);
+			@out.println(iline + "     : gwmaxrc Maximum recharge limit, cfs (if iwell=2)");
+
+			v[0] = new int?(dataset.getIsjrip());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : isjrip  (SJRIP) sediment file (-1=no but file in .rsp,0=no,1=yes)");
+
+			v[0] = new int?(dataset.getItsfile());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : itsfile Use *.ipy file (-1=no but file in .rsp,0=no,1=annual GW lim," + "2=annual well cap only,10=all data)");
+
+			v[0] = new int?(dataset.getIeffmax());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : ieffmax Use consumptive water requirement file (-1=no but file in .rsp,0=no,1=yes,2=see documentation)");
+
+			v[0] = new int?(dataset.getIsprink());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : isprink Use sprinkler area and efficiency data (0=no, 1=yes)");
+
+			v[0] = new double?(dataset.getSoild());
+			if (dataset.getSoild() > 0.0)
+			{
+				iline = StringUtil.formatString(v, formatf1);
+			}
+			else
+			{
+				iline = StringUtil.formatString(v, formatf0);
+			}
+			@out.println(iline + "     : soild   Soil moist accounting (-1=no but file in .rsp,0=no,+n=soil zone depth in ft)");
+
+			v[0] = new int?(dataset.getIsig());
+			iline = StringUtil.formatString(v, formatd);
+			@out.println(iline + "     : isig    Digits after decimal point in output (0=none,1=one,2=two)");
+		}
+		catch (Exception e)
+		{
+			// Log it and rethrow
+			Message.printWarning(3, routine, e);
+			throw e;
+		}
+		finally
+		{
+			if (@out != null)
+			{
+				@out.flush();
+				@out.close();
+			}
+		}
+	}
+
+	/// <summary>
+	/// Write data set information to the StateMod response file.  History header
+	/// information is also maintained by calling this routine. </summary>
+	/// <param name="instrfile"> input file from which previous history should be taken. </param>
+	/// <param name="outstrfile"> output file to write. </param>
+	/// <param name="newComments"> addition comments that should be included in history. </param>
+	/// <exception cref="Exception"> if an error occurs. </exception>
+//JAVA TO C# CONVERTER WARNING: Method 'throws' clauses are not available in .NET:
+//ORIGINAL LINE: public static void writeStateModFile(StateMod_DataSet dataset, String instrfile, String outstrfile, java.util.List<String> newComments) throws Exception
+	public static void writeStateModFile(StateMod_DataSet dataset, string instrfile, string outstrfile, IList<string> newComments)
+	{
+		string routine = "StateMod_DataSet.writeStateModFile";
+		IList<string> commentStr = new List<object>();
+		commentStr.Add("#");
+		IList<string> ignoreCommentStr = new List<object>();
+		ignoreCommentStr.Add("#>");
+		PrintWriter @out = null;
+		try
+		{
+			@out = IOUtil.processFileHeaders(instrfile, outstrfile, newComments, commentStr, ignoreCommentStr, 0);
+
+			string cmnt = "#>";
+			DataSetComponent comp = null;
+			@out.println(cmnt);
+			@out.println(cmnt + " StateMod Response File - list of files in the data set");
+			@out.println(cmnt);
+			@out.println(cmnt + " The file type is indicated in the left 40 characters, followed by = and the filename.");
+			@out.println(cmnt + " Lines starting with # indicate comments.");
+			@out.println(cmnt + " StateModExecutable can also be set to the *.exe for the StateMod GUI to use.");
+			@out.println(cmnt);
+			@out.println(cmnt + "EndHeader");
+			@out.println(cmnt + "-------------------------------------e=b...");
+
+			// Loop through all the components in a data set
+			string format = "%-40.40s";
+			for (int i = 0; i < __component_names.Length; i++)
+			{
+				comp = dataset.getComponentForComponentType(i);
+				if (comp == null)
+				{
+					Message.printStatus(3, routine, "Component type " + i + "(" + dataset.lookupComponentName(i) + ") is null - not writing.");
+					continue;
+				}
+
+				if (comp.isGroup())
+				{
+					// Print a comment with the group name, but only if there are files in the group
+					IList<DataSetComponent> componentsForGroup = dataset.getComponentsForGroup(comp);
+					int fileCount = 0;
+					foreach (DataSetComponent comp2 in componentsForGroup)
+					{
+						string filename = dataset.getDataFilePathRelative(comp2.getComponentType());
+						if ((!string.ReferenceEquals(filename, null)) && (filename.Trim().Length > 0))
+						{
+							++fileCount;
+						}
+					}
+					if (fileCount > 0)
+					{
+						@out.println(cmnt + " _________________________________");
+						@out.println(cmnt);
+						@out.println(cmnt + " " + comp.getComponentName());
+					}
+				}
+				else
+				{
+					// Print the component property and file name
+					string filename = dataset.getDataFilePathRelative(i);
+					if ((string.ReferenceEquals(filename, null)) || (filename.Trim().Length == 0))
+					{
+						// TODO SAM 2011-01-17 Should empty files be output to help user or omit
+						// For now omit
+					}
+					else
+					{
+						// Output the file name.
+						@out.println(StringUtil.formatString(dataset.getStateModFileProperty(i),format) + "= " + filename);
+					}
+				}
+			}
+			// Also write unhandled properties to preserve original *rsp file contents...
+			PropList props = dataset.getUnhandledResponseFileProperties();
+			int propsSize = props.size();
+			if (propsSize > 0)
+			{
+				@out.println(cmnt + " _________________________________");
+				@out.println(cmnt);
+				@out.println(cmnt + " Properties not handled by StateMod GUI, StateDMI (written to preserve *.rsp)");
+				@out.println(cmnt + " Some possible reasons are:");
+				@out.println(cmnt + " - it is a new file in StateMod and other software has not been updated");
+				@out.println(cmnt + " - it is an old file that is supported in StateMod but not other software");
+				@out.println(cmnt + " - it is a simple configuration property (rather than a file name)");
+				for (int i = 0; i < props.size(); i++)
+				{
+					@out.println(StringUtil.formatString(props.elementAt(i).getKey(),format) + "= " + props.elementAt(i).getValue());
+				}
+			}
+		}
+		catch (Exception e)
+		{
+			// Log and rethrow
+			Message.printWarning(3, routine, e);
+			throw e;
+		}
+		finally
+		{
+			if (@out != null)
+			{
+				@out.flush();
+				@out.close();
+			}
+		}
+	}
+
+	}
+
+}
