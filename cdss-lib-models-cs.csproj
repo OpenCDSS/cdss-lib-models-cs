@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <RootNamespace>cdss_lib_models_cs_class_lib_proj</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="src-autogen-from-java\**" />
+    <EmbeddedResource Remove="src-autogen-from-java\**" />
+    <None Remove="src-autogen-from-java\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\cdss-lib-common-cs\cdss-lib-common-cs.csproj" />
+  </ItemGroup>
+
+</Project>
