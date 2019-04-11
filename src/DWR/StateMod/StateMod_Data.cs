@@ -192,6 +192,30 @@ namespace DWR.StateMod
         }
 
         /// <summary>
+        /// Return the Cgoto.
+        /// </summary>
+        public virtual string getCgoto()
+        {
+            return _cgoto;
+        }
+
+        /// <summary>
+        /// Return the ID.
+        /// </summary>
+        public virtual string getID()
+        {
+            return _id;
+        }
+
+        /// <summary>
+        /// Return the name.
+        /// </summary>
+        public virtual string getName()
+        {
+            return _name;
+        }
+
+        /// <summary>
         /// Initialize data members.
         /// </summary>
         private void initialize()
@@ -208,6 +232,25 @@ namespace DWR.StateMod
             _new_utm = 0;
             _utm_x = -999;
             _utm_y = -999;
+        }
+
+        /// <summary>
+        /// Set the Cgoto. </summary>
+        /// <param name="s"> the new Cgoto. </param>
+        public virtual void setCgoto(string s)
+        {
+            if (string.ReferenceEquals(s, null))
+            {
+                return;
+            }
+            if (!s.Equals(_cgoto))
+            {
+                if (!_isClone && !_isClone && _dataset != null)
+                {
+                    _dataset.setDirty(_smdata_type, true);
+                }
+                _cgoto = s;
+            }
         }
 
         /// <summary>
@@ -286,6 +329,41 @@ namespace DWR.StateMod
                 }
                 _name = s;
             }
+        }
+
+        /// <summary>
+        /// Set the switch. </summary>
+        /// <param name="i"> the new switch: 1 = on, 0 = off, or other values for some data types. </param>
+        public virtual void setSwitch(int i)
+        {
+            if (i != _switch)
+            {
+                if (!_isClone && _dataset != null)
+                {
+                    _dataset.setDirty(_smdata_type, true);
+                }
+                _switch = i;
+            }
+        }
+
+        /// <summary>
+        /// Set the switch. </summary>
+        /// <param name="i"> the new switch: 1 = on, 0 = off. </param>
+        public virtual void setSwitch(int? i)
+        {
+            setSwitch(i.Value);
+        }
+
+        /// <summary>
+        /// Set the switch </summary>
+        /// <param name="str"> the new switch: 1 = on, 0 = off </param>
+        public virtual void setSwitch(string str)
+        {
+            if (string.ReferenceEquals(str, null))
+            {
+                return;
+            }
+            setSwitch(int.Parse(str.Trim()));
         }
     }
 }

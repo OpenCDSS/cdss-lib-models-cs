@@ -263,7 +263,7 @@ namespace DWR.StateMod
                     s = ((string)v[6]).Trim();
                     if (s.Length > 0)
                     {
-                        aRiverNode.setGwmaxr(StringUtil.atod(s).ToString());
+                        aRiverNode.setGwmaxr(double.Parse(s).ToString());
                     }
 
                     // add the node to the vector of river nodes
@@ -308,7 +308,7 @@ namespace DWR.StateMod
         {
             if (StringUtil.isDouble(gwmaxr))
             {
-                setGwmaxr(StringUtil.atod(gwmaxr));
+                setGwmaxr(double.Parse(gwmaxr));
             }
         }
 

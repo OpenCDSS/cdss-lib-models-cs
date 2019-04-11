@@ -174,5 +174,33 @@ namespace DWR.StateMod
             return false;
         }
 
+        /// <summary>
+        /// Find the position of a StateMod_Data object in the data Vector, using the
+        /// identifier.  The position for the first match is returned. </summary>
+        /// <returns> the position, or -1 if not found. </returns>
+        /// <param name="id"> StateMod_Data identifier. </param>
+        public static int indexOf(System.Collections.IList data, string id)
+        {
+            int size = 0;
+            if (string.ReferenceEquals(id, null))
+            {
+                return -1;
+            }
+            if (data != null)
+            {
+                size = data.Count;
+            }
+            StateMod_Data d = null;
+            for (int i = 0; i < size; i++)
+            {
+                d = (StateMod_Data)data[i];
+                if (id.Equals(d._id, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
     }
 }

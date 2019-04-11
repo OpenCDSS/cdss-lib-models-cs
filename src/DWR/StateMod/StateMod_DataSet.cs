@@ -32,6 +32,7 @@ namespace DWR.StateMod
     using IOUtil = RTi.Util.IO.IOUtil;
     using DataSet = RTi.Util.IO.DataSet;
     using DataSetComponent = RTi.Util.IO.DataSetComponent;
+    using DayTS = RTi.TS.DayTS;
     using Prop = RTi.Util.IO.Prop;
     using PropList = RTi.Util.IO.PropList;
     using ProcessListener = RTi.Util.IO.ProcessListener;
@@ -43,19 +44,86 @@ namespace DWR.StateMod
     using TimeInterval = RTi.Util.Time.TimeInterval;
     using TS = RTi.TS.TS;
     //using TimeUtil = RTi.Util.Time.TimeUtil;
-    //using YearType = RTi.Util.Time.YearType;
+    using YearType = RTi.Util.Time.YearType;
 
     public class StateMod_DataSet : DataSet
     {
+        /// <summary>
+        /// Cubic-feet per second.  Potential parameter in setIresop.
+        /// </summary>
+        public const int SM_CFS = 1;
+        /// <summary>
+        /// Acre-feet per second.  Potential parameter in setIresop.
+        /// </summary>
+        public const int SM_ACFT = 2;
+        /// <summary>
+        /// Kilo Acre-feet per second.  Potential parameter in setIresop.
+        /// </summary>
+        public const int SM_KACFT = 3;
+        /// <summary>
+        /// CFS for daily, ACFT for monthly.  Potential parameter in setIresop.
+        /// </summary>
+        public const int SM_CFS_ACFT = 4;
+        /// <summary>
+        /// Cubic meters per second.  Potential parameter in setIresop.
+        /// </summary>
+        public const int SM_CMS = 5;
 
+        /// <summary>
+        /// Monthly data.  Potential parameter in setMoneva.
+        /// </summary>
+        public const int SM_MONTHLY = 0;
+        /// <summary>
+        /// Average data.  Potential parameter in setMoneva.
+        /// </summary>
+        public const int SM_AVERAGE = 1;
+
+        /// <summary>
+        /// Average data.  Potential parameter in setIopflo.
+        /// </summary>
+        public const int SM_TOT = 1;
+        /// <summary>
+        /// Gains data.  Potential parameter in setIopflo.
+        /// </summary>
+        public const int SM_GAINS = 2;
+
+        public readonly int WAIT = 0;
+        public readonly int READY = 1;
+
+        private IList<ProcessListener> __processListeners = null;
         /// <summary>
         /// Indicates whether time series are read when reading the data set.  This was put in place when software
         /// performance was slow but generally now it is not an issue.  Leave in for some period but phase out if
         /// performance is not an issue.
         /// </summary>
         private bool __readTimeSeries = true;
+        /// <summary>
+        /// String indicating blank file name - allowed to be a duplicate.
+        /// </summary>
+        public readonly string BLANK_FILE_NAME = "";
+        /// <summary>
+        /// Appended to some daily time series data types to indicate an estimated time series.
+        /// </summary>
+        private readonly string __ESTIMATED = "Estimated";
 
-        private IList<ProcessListener> __processListeners = null;
+        // TODO - SAM - StateMod data set types are not the same as StateCU and may not be needed at all.
+
+        /// <summary>
+        /// The StateMod data set type is unknown.
+        /// </summary>
+        public const int TYPE_UNKNOWN = 0;
+        public const string NAME_UNKNOWN = "Unknown";
+
+        // TODO - Start SAM new definitions (indent to illustrate groups).
+
+        /// <summary>
+        /// Use for initialization, if needed.
+        /// </summary>
+        public const int COMP_UNKNOWN = -1;
+        /// <summary>
+        /// Used when defining other nodes in the network, via the GUI.
+        /// </summary>
+        public const int COMP_OTHER_NODE = -5;
 
         // The following should be sequential from 0 because they have lookup positions in DataSet arrays.
         //
@@ -72,6 +140,13 @@ namespace DWR.StateMod
         // The data set component names, including the component groups.  Subcomponent
         // names are defined after this array and are currently treated as special cases.
         private static string[] __component_names = new string[] { "Control Data", "Response", "Control", "Output Request", "Reach Data", "Consumptive Use Data", "StateCU Structure", "Irrigation Practice TS (Yearly)", "Consumptive Water Requirement TS (Monthly)", "Consumptive Water Requirement TS (Daily)", "Stream Gage Data", "Stream Gage Stations", "Stream Gage Historical TS (Monthly)", "Stream Gage Historical TS (Daily)", "Stream Gage Natural Flow TS (Monthly)", "Stream Gage Natural Flow TS (Daily)", "Delay Table (Monthly) Data", "Delay Tables (Monthly)", "Delay Table (Daily) Data", "Delay Tables (Daily)", "Diversion Data", "Diversion Stations", "Diversion Rights", "Diversion Historical TS (Monthly)", "Diversion Historical TS (Daily)", "Diversion Demand TS (Monthly)", "Diversion Demand TS Override (Monthly)", "Diversion Demand TS (Average Monthly)", "Diversion Demand TS (Daily)", "Precipitation Data", "Precipitation Time Series (Monthly)", "Precipitation Time Series (Yearly)", "Evaporation Data", "Evaporation Time Series (Monthly)", "Evaporation Time Series (Yearly)", "Reservoir Data", "Reservoir Stations", "Reservoir Rights", "Reservoir Content TS, End of Month (Monthly)", "Reservoir Content TS, End of Day (Daily)", "Reservoir Target TS (Monthly)", "Reservoir Target TS (Daily)", "Reservoir Return Flows", "Instream Flow Data", "Instream Flow Stations", "Instream Flow Rights", "Instream Flow Demand TS (Monthly)", "Instream Flow Demand TS (Average Monthly)", "Instream Flow Demand TS (Daily)", "Well Data", "Well Stations", "Well Rights", "Well Historical Pumping TS (Monthly)", "Well Historical Pumping TS (Daily)", "Well Demand TS (Monthly)", "Well Demand TS (Daily)", "Plan Data", "Plans", "Plan Well Augmentation Data", "Plan Return Flows", "Stream Estimate Data", "Stream Estimate Stations", "Stream Estimate Coefficients", "Stream Estimate Natural Flow TS (Monthly)", "Stream Estimate Natural Flow TS (Daily)", "River Network Data", "River Network", "Network (Graphical)", "Operational Data", "Operational Rights", "Downstream Call Time Series (Daily)", "San Juan Sediment Recovery Plan", "Rio Grande Spill (Monthly)", "Spatial Data", "GeoView Project" };
+
+        /// <summary>
+        /// Subcomponent names used with lookupComponentName().  These are special
+        /// cases for labels and displays but the data are managed with a component
+        /// listed above.  Make private to force handling through lookup methods.
+        /// </summary>
+        private const string __COMPNAME_DIVERSION_STATION_DELAY_TABLES = "Diversion Station Delay Table Assignment", __COMPNAME_DIVERSION_STATION_COLLECTIONS = "Diversion Station Collection Definitions", __COMPNAME_RESERVOIR_STATION_ACCOUNTS = "Reservoir Station Accounts", __COMPNAME_RESERVOIR_STATION_PRECIP_STATIONS = "Reservoir Station Precipitation Stations", __COMPNAME_RESERVOIR_STATION_EVAP_STATIONS = "Reservoir Station Evaporation Stations", __COMPNAME_RESERVOIR_STATION_CURVE = "Reservoir Station Content/Area/Seepage", __COMPNAME_RESERVOIR_STATION_COLLECTIONS = "Reservoir Station Collection Definitions", __COMPNAME_WELL_STATION_DELAY_TABLES = "Well Station Delay Table Assignment", __COMPNAME_WELL_STATION_DEPLETION_TABLES = "Well Station Depletion Table Assignment", __COMPNAME_WELL_STATION_COLLECTIONS = "Well Station Collection Definitions";
 
         /// <summary>
         /// List of all the components, by number (type).
@@ -157,11 +232,11 @@ namespace DWR.StateMod
         /// <summary>
         /// Starting year of the simulation.  Must be defined.
         /// </summary>
-        //private int __iystr = StateMod_Util.MISSING_INT;
+        private int __iystr = StateMod_Util.MISSING_INT;
         /// <summary>
         /// Ending year of the simulation.  Must be defined.
         /// </summary>
-        //private int __iyend = StateMod_Util.MISSING_INT;
+        private int __iyend = StateMod_Util.MISSING_INT;
         /// <summary>
         /// Switch for output units.  Default is ACFT.
         /// </summary>
@@ -220,7 +295,7 @@ namespace DWR.StateMod
         /// <summary>
         /// Calendar/water/irrigation year - default to calendar.
         /// </summary>
-        //private YearType __cyrl = YearType.CALENDAR;
+        private YearType __cyrl = YearType.CALENDAR;
         /// <summary>
         /// Switch for demand type.  Default to historic approach.
         /// </summary>
@@ -606,12 +681,55 @@ namespace DWR.StateMod
         }
 
         /// <summary>
+        /// Retrieve max number of entries in a delay pattern. </summary>
+        /// <returns> __interv </returns>
+        public virtual int getInterv()
+        {
+            return __interv;
+        }
+
+        /// <summary>
         /// Return the list of unhandled response file properties.  These are entries in the *rsp file that the code
         /// does not specifically handle, such as new files or uninplemented files. </summary>
         /// <returns> properties from the response file that are not explicitly handled </returns>
         public virtual PropList getUnhandledResponseFileProperties()
         {
             return __unhandledResponseFileProperties;
+        }
+
+        /// <summary>
+        /// Indicate whether the data set has San Juan Recovery data (isjrip not missing and isjrip not equal 0).
+        /// Use this method instead of checking isjrip directly to simplify logic and allow
+        /// for future changes to the model input. </summary>
+        /// <returns> true if the data set includes San Juan Recovery data (isjrip not missing
+        /// and isjrip != 0).  Return false if San Juan Recovery data are not used. </returns>
+        /// <param name="is_active"> Only return true if San Juan Recovery data are included in the
+        /// data set and the data are active (isjrip = 1). </param>
+        public virtual bool hasSanJuanData(bool is_active)
+        {
+            if (is_active)
+            {
+                if (__isjrip == 1)
+                {
+                    // San Juan Recovery data are included in the data set and are used...
+                    return true;
+                }
+                else
+                {
+                    // San Juan Revovery data may or may not be included in the data set but are not used...
+                    return false;
+                }
+            }
+            else if (!StateMod_Util.isMissing(__isjrip) && (__isjrip != 0))
+            {
+                // Data are specified in the data set but are not used...
+                return true;
+            }
+            else
+            {
+                // San Juan Recovery data are not included...
+                return false;
+            }
         }
 
         /// <summary>
@@ -1046,8 +1164,10 @@ namespace DWR.StateMod
         /// <exception cref="IOException"> if there is an unhandled error reading files. </exception>
         //JAVA TO C# CONVERTER WARNING: Method 'throws' clauses are not available in .NET:
         //ORIGINAL LINE: public void readStateModFile(String filename, boolean readData, boolean readTimeSeries, boolean useGUI, javax.swing.JFrame parent) throws IllegalArgumentException, java.io.IOException
-        public virtual void readStateModFile(string filename, bool readData, bool readTimeSeries, bool useGUI)//, JFrame parent)
+        public virtual void  readStateModFile(string filename, bool readData, bool readTimeSeries, bool useGUI)//, JFrame parent)
         {
+            bool outputFiles = false;
+
             string routine = "StateMod_DataSet.readStateModFile";
             if (!readData)
             {
@@ -1135,14 +1255,14 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    readStateModControlFile(fn);
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        readStateModControlFile(fn);
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1179,11 +1299,14 @@ namespace DWR.StateMod
                         readStateModFile_Announce1(comp);
                         comp.setData(StateMod_RiverNetworkNode.readStateModFile(fn));
                         string s = comp.getComponentName() + " data: \n";
-                        foreach(StateMod_RiverNetworkNode node in (List<StateMod_RiverNetworkNode>)comp.getData())
+                        if (outputFiles)
                         {
-                            s+= node.ToString() + "\n";
+                            foreach (StateMod_RiverNetworkNode node in (List<StateMod_RiverNetworkNode>)comp.getData())
+                            {
+                                s += node.ToString() + "\n";
+                            }
+                            Message.printDebug(1, routine, s);
                         }
-                        Message.printDebug(1, routine, s);
                     }
                 }
                 catch (Exception e)
@@ -1211,14 +1334,14 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     //// Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_Reservoir.readStateModFile(fn));
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_Reservoir.readStateModFile(fn));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1245,14 +1368,14 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_Diversion.readStateModFile(fn));
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_Diversion.readStateModFile(fn));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1279,14 +1402,18 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_StreamGage.readStateModFile(fn));
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_StreamGage.readStateModFile(fn));
+                    }
+                    //IList<string> newComments = new List<string>();
+                    //Debug.WriteLine((List<StateMod_StreamGage>)comp.getData()[0]);
+                    //StateMod_StreamGage.writeStateModFile("../../../test/datasets/cdss-yampa/StateMod/ym2015.ris", 
+                    //    "../../../test/datasets/cdss-yampa/StateMod/output/output.txt", comp.getData(), newComments, true);
                 }
                 catch (Exception e)
                 {
@@ -1330,15 +1457,15 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // (Re)read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    // Use the relative path...
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_StreamEstimate.readStateModFile(fn));
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        // Use the relative path...
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_StreamEstimate.readStateModFile(fn));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1365,14 +1492,14 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_InstreamFlow.readStateModFile(fn));
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_InstreamFlow.readStateModFile(fn));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1399,14 +1526,14 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && hasWellData(false) && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_Well.readStateModFile(fn));
-                    //}
+                    if (readData && hasWellData(false) && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_Well.readStateModFile(fn));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1437,14 +1564,14 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_Plan.readStateModFile(fn));
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_Plan.readStateModFile(fn));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1471,14 +1598,14 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_Plan_WellAugmentation.readStateModFile(fn));
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_Plan_WellAugmentation.readStateModFile(fn));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1505,14 +1632,14 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_ReturnFlow.readStateModFile(fn, COMP_PLAN_RETURN));
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_ReturnFlow.readStateModFile(fn, COMP_PLAN_RETURN));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1539,16 +1666,16 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_InstreamFlowRight.readStateModFile(fn));
-                    //    Message.printStatus(1, routine, "Connecting instream flow rights to stations.");
-                    //    StateMod_InstreamFlow.connectAllRights((System.Collections.IList)getComponentForComponentType(COMP_INSTREAM_STATIONS).getData(), (System.Collections.IList)comp.getData());
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_InstreamFlowRight.readStateModFile(fn));
+                        Message.printStatus(1, routine, "Connecting instream flow rights to stations.");
+                        StateMod_InstreamFlow.connectAllRights((IList<StateMod_InstreamFlow>)getComponentForComponentType(COMP_INSTREAM_STATIONS).getData(), (IList<StateMod_InstreamFlowRight>)comp.getData());
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1575,16 +1702,16 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_ReservoirRight.readStateModFile(fn));
-                    //    Message.printStatus(1, routine, "Connecting reservoir rights with reservoir stations.");
-                    //    StateMod_Reservoir.connectAllRights((System.Collections.IList)getComponentForComponentType(COMP_RESERVOIR_STATIONS).getData(), (System.Collections.IList)comp.getData());
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_ReservoirRight.readStateModFile(fn));
+                        Message.printStatus(1, routine, "Connecting reservoir rights with reservoir stations.");
+                        StateMod_Reservoir.connectAllRights((IList<StateMod_Reservoir>)getComponentForComponentType(COMP_RESERVOIR_STATIONS).getData(), (IList<StateMod_ReservoirRight>)comp.getData());
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1611,16 +1738,16 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_DiversionRight.readStateModFile(fn));
-                    //    Message.printStatus(1, routine, "Connecting diversion rights to diversion stations");
-                    //    StateMod_Diversion.connectAllRights((System.Collections.IList)getComponentForComponentType(COMP_DIVERSION_STATIONS).getData(), (System.Collections.IList)comp.getData());
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_DiversionRight.readStateModFile(fn));
+                        Message.printStatus(1, routine, "Connecting diversion rights to diversion stations");
+                        StateMod_Diversion.connectAllRights((IList<StateMod_Diversion>)getComponentForComponentType(COMP_DIVERSION_STATIONS).getData(), (IList<StateMod_DiversionRight>)comp.getData());
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1647,14 +1774,14 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_OperationalRight.readStateModFile(fn, this));
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_OperationalRight.readStateModFile(fn, this));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1681,16 +1808,16 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_WellRight.readStateModFile(fn));
-                    //    Message.printStatus(1, routine, "Connecting well rights to well stations.");
-                    //    StateMod_Well.connectAllRights((System.Collections.IList)getComponentForComponentType(COMP_WELL_STATIONS).getData(), (System.Collections.IList)comp.getData());
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_WellRight.readStateModFile(fn));
+                        Message.printStatus(1, routine, "Connecting well rights to well stations.");
+                        StateMod_Well.connectAllRights((IList<StateMod_Well>)getComponentForComponentType(COMP_WELL_STATIONS).getData(), (IList<StateMod_WellRight>)comp.getData());
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1734,6 +1861,11 @@ namespace DWR.StateMod
                             ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_PRECIPITATION_TS_MONTHLY));
                         }
                         comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Precipitation_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
                     }
                 }
                 catch (Exception e)
@@ -1781,6 +1913,11 @@ namespace DWR.StateMod
                             ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_PRECIPITATION_TS_YEARLY));
                         }
                         comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Preciptation_Annual_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
                     }
                 }
                 catch (Exception e)
@@ -1808,26 +1945,31 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    // TODO Old-style data that may be removed in new StateMod...
-                    //    setNumeva(size);
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_EVAPORATION_TS_MONTHLY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        // TODO Old-style data that may be removed in new StateMod...
+                        setNumeva(size);
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_EVAPORATION_TS_MONTHLY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Evaporation_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1856,26 +1998,31 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    // TODO Old-style data that may be removed in new StateMod...
-                    //    setNumeva(size);
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_EVAPORATION_TS_YEARLY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        // TODO Old-style data that may be removed in new StateMod...
+                        setNumeva(size);
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_EVAPORATION_TS_YEARLY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Evaporation_Annual_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1903,30 +2050,35 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_STREAMGAGE_NATURAL_FLOW_TS_MONTHLY));
-                    //    }
-                    //    comp.setData(v);
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_STREAMGAGE_NATURAL_FLOW_TS_MONTHLY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Stream_Base_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
 
-                    //    // The StreamGage and StreamEstimate groups share the same natural flow time series files...
+                        // The StreamGage and StreamEstimate groups share the same natural flow time series files...
 
-                    //    comp2 = getComponentForComponentType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_MONTHLY);
-                    //    comp2.setDataFileName(comp.getDataFileName());
-                    //    comp2.setData(v);
-                    //}
+                        comp2 = getComponentForComponentType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_MONTHLY);
+                        comp2.setDataFileName(comp.getDataFileName());
+                        comp2.setData(v);
+                    }
                 }
                 catch (Exception e)
                 {
@@ -1958,24 +2110,29 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    readStateModFile_Announce1(comp);
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_MONTHLY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        readStateModFile_Announce1(comp);
+                        fn = getDataFilePathAbsolute(fn);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_MONTHLY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Diversion_Demand_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2002,24 +2159,29 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    readStateModFile_Announce1(comp);
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_OVERRIDE_MONTHLY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        readStateModFile_Announce1(comp);
+                        fn = getDataFilePathAbsolute(fn);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_OVERRIDE_MONTHLY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Diversion_DemandOverride_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2046,24 +2208,29 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    readStateModFile_Announce1(comp);
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_AVERAGE_MONTHLY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        readStateModFile_Announce1(comp);
+                        fn = getDataFilePathAbsolute(fn);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_AVERAGE_MONTHLY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Diversion_Demand_AverageMonthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2090,24 +2257,29 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data file...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    readStateModFile_Announce1(comp);
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_MONTHLY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        readStateModFile_Announce1(comp);
+                        fn = getDataFilePathAbsolute(fn);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_MONTHLY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Instreamflow_Demand_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2134,24 +2306,29 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_AVERAGE_MONTHLY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_AVERAGE_MONTHLY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Instreamflow_Demand_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2178,24 +2355,29 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_WELL_DEMAND_TS_MONTHLY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_WELL_DEMAND_TS_MONTHLY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Well_Demand_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2256,31 +2438,36 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        if ((i % 2) == 0)
-                    //        {
-                    //            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_MONTHLY) + "Min");
-                    //        }
-                    //        else
-                    //        {
-                    //            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_MONTHLY) + "Max");
-                    //        }
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            if ((i % 2) == 0)
+                            {
+                                ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_MONTHLY) + "Min");
+                            }
+                            else
+                            {
+                                ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_MONTHLY) + "Max");
+                            }
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Reservoir_Target_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2307,14 +2494,14 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_ReturnFlow.readStateModFile(fn, COMP_RESERVOIR_RETURN));
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_ReturnFlow.readStateModFile(fn, COMP_RESERVOIR_RETURN));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2342,10 +2529,10 @@ namespace DWR.StateMod
                     }
                     // Read the data...
                     //readInputAnnounce1(comp);
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && hasSanJuanData(false) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    Message.printWarning(1, routine, "Do not know how to read the San Juan Recovery file.");
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && hasSanJuanData(false) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        Message.printWarning(1, routine, "Do not know how to read the San Juan Recovery file.");
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2373,10 +2560,10 @@ namespace DWR.StateMod
                     }
                     // Read the data...
                     //readInputAnnounce1(comp);
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && hasSanJuanData(false) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    Message.printWarning(1, routine, "Reading Rio Grande Spill file is not enabled.");
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && hasSanJuanData(false) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        Message.printWarning(1, routine, "Reading Rio Grande Spill file is not enabled.");
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2437,24 +2624,29 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_MONTHLY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/ConsumptiveWaterRequirement_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2524,25 +2716,30 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    // Set the data type because it is not in the StateMod file...
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_CONTENT_TS_MONTHLY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        // Set the data type because it is not in the StateMod file...
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_CONTENT_TS_MONTHLY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Reservoir_Historic_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2569,14 +2766,14 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_StreamEstimate_Coefficients.readStateModFile(fn));
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_StreamEstimate_Coefficients.readStateModFile(fn));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2621,8 +2818,11 @@ namespace DWR.StateMod
                             ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_STREAMGAGE_HISTORICAL_TS_MONTHLY));
                         }
                         comp.setData(v);
-                        response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/StateMod_TS_Output.ddh");
-                        StateMod_TS.writeTimeSeriesList(v, response_props);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/StreamGage_History_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
                     }
                 }
                 catch (Exception e)
@@ -2652,9 +2852,6 @@ namespace DWR.StateMod
                     // Now read the file if requested...
                     if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
                     {
-                        Message.printDebug(1, routine, "----------------------------------------------");
-                        Message.printDebug(1, routine, "About to read .ddh StateModTS File...");
-                        Message.printDebug(1, routine, "----------------------------------------------");
                         readTime.clear();
                         readTime.start();
                         readStateModFile_Announce1(comp);
@@ -2670,6 +2867,11 @@ namespace DWR.StateMod
                             ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DIVERSION_TS_MONTHLY));
                         }
                         comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Diversion_Historic_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
                     }
                 }
                 catch (Exception e)
@@ -2697,24 +2899,29 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_WELL_PUMPING_TS_MONTHLY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_WELL_PUMPING_TS_MONTHLY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Well_Historic_Monthly_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2805,10 +3012,10 @@ namespace DWR.StateMod
                     }
                     // Read the data...
                     //readInputAnnounce1(comp, readTime.getSeconds());
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    Message.printWarning(2, routine, "Reach data file - not yet supported.");
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        Message.printWarning(2, routine, "Reach data file - not yet supported.");
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2836,30 +3043,36 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_STREAMGAGE_NATURAL_FLOW_TS_DAILY));
-                    //    }
-                    //    comp.setData(v);
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_STREAMGAGE_NATURAL_FLOW_TS_DAILY));
+                        }
+                        comp.setData(v);
 
-                    //    // The StreamGage and StreamEstimate groups share the same natural flow time series files...
+                        // The StreamGage and StreamEstimate groups share the same natural flow time series files...
 
-                    //    comp2 = getComponentForComponentType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_DAILY);
-                    //    comp2.setDataFileName(comp.getDataFileName());
-                    //    comp2.setData(v);
-                    //}
+                        comp2 = getComponentForComponentType(COMP_STREAMESTIMATE_NATURAL_FLOW_TS_DAILY);
+                        comp2.setDataFileName(comp.getDataFileName());
+                        comp2.setData(v);
+
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Stream_Base_Daily_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2891,24 +3104,29 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_DAILY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DEMAND_TS_DAILY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Diversion_Demand_Daily_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2935,24 +3153,29 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_DAILY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_INSTREAM_DEMAND_TS_DAILY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Instreamflow_Demand_Daily_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -2979,24 +3202,29 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_WELL_DEMAND_TS_DAILY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_WELL_DEMAND_TS_DAILY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Well_Demand_Daily_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -3023,31 +3251,36 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        if ((i % 2) == 0)
-                    //        {
-                    //            ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_DAILY) + "Min");
-                    //        }
-                    //        else
-                    //        {
-                    //            ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_DAILY) + "Max");
-                    //        }
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            if ((i % 2) == 0)
+                            {
+                                ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_DAILY) + "Min");
+                            }
+                            else
+                            {
+                                ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_TARGET_TS_DAILY) + "Max");
+                            }
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Reservoir_Target_Daily_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -3108,24 +3341,29 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_CONSUMPTIVE_WATER_REQUIREMENT_TS_DAILY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/ConsumptiveWaterRequirement_Daily_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -3152,25 +3390,30 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        // Set this information because it is not in the StateMod time series file...
-                    //        ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_STREAMGAGE_HISTORICAL_TS_DAILY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            // Set this information because it is not in the StateMod time series file...
+                            ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_STREAMGAGE_HISTORICAL_TS_DAILY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/StreamGage_Historic_Daily_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -3197,25 +3440,30 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    // Set the data type because it is not in the StateMod file...
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DIVERSION_TS_DAILY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        // Set the data type because it is not in the StateMod file...
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((DayTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_DIVERSION_TS_DAILY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Diversion_Historic_Daily_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -3242,25 +3490,30 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Now read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    // Set the data type because it is not in the StateMod file...
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_WELL_PUMPING_TS_DAILY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        // Set the data type because it is not in the StateMod file...
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_WELL_PUMPING_TS_DAILY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Well_Historic_Daily_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -3287,25 +3540,30 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data file...
-                    //if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    System.Collections.IList v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
-                    //    if (v == null)
-                    //    {
-                    //        v = new List<object>();
-                    //    }
-                    //    // Set the data type because it is not in the StateMod file...
-                    //    size = v.Count;
-                    //    for (i = 0; i < size; i++)
-                    //    {
-                    //        ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_CONTENT_TS_DAILY));
-                    //    }
-                    //    comp.setData(v);
-                    //}
+                    if (readData && __readTimeSeries && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        IList<TS> v = StateMod_TS.readTimeSeriesList(fn, null, null, null, true);
+                        if (v == null)
+                        {
+                            v = new List<TS>();
+                        }
+                        // Set the data type because it is not in the StateMod file...
+                        size = v.Count;
+                        for (i = 0; i < size; i++)
+                        {
+                            ((MonthTS)v[i]).setDataType(lookupTimeSeriesDataType(COMP_RESERVOIR_CONTENT_TS_DAILY));
+                        }
+                        comp.setData(v);
+                        if (outputFiles)
+                        {
+                            response_props.set("OutputFile", "../../../test/datasets/cdss-yampa/StateMod/output/Reservoir_Historic_Daily_Output.stm");
+                            StateMod_TS.writeTimeSeriesList(v, response_props);
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -3332,14 +3590,14 @@ namespace DWR.StateMod
                         comp.setDataFileName(fn);
                     }
                     // Read the data...
-                    //if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
-                    //{
-                    //    readTime.clear();
-                    //    readTime.start();
-                    //    fn = getDataFilePathAbsolute(fn);
-                    //    readStateModFile_Announce1(comp);
-                    //    comp.setData(StateMod_DownstreamCall.readStateModFile(fn));
-                    //}
+                    if (readData && (!string.ReferenceEquals(fn, null)) && !fileIsEmpty(getDataFilePathAbsolute(fn)))
+                    {
+                        readTime.clear();
+                        readTime.start();
+                        fn = getDataFilePathAbsolute(fn);
+                        readStateModFile_Announce1(comp);
+                        comp.setData(StateMod_DownstreamCall.readStateModFile(fn));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -3547,70 +3805,162 @@ namespace DWR.StateMod
         }
 
         /// <summary>
-        /// Send a message to ProcessListener that have been registered with this object.
-        /// This is usually a main application that is giving feedback to a user via the messages.
-        /// </summary>
-        public virtual void sendProcessListenerMessage(int status, string message)
+        /// Read a StateMod control file and stores its information in this StateMod_DataSet object. </summary>
+        /// <param name="filename"> the file in which the control file is stored </param>
+        /// <exception cref="Exception"> if an error occurs </exception>
+        //JAVA TO C# CONVERTER WARNING: Method 'throws' clauses are not available in .NET:
+        //ORIGINAL LINE: public void readStateModControlFile(String filename) throws Exception
+        public virtual void readStateModControlFile(string filename)
         {
-            int size = 0;
-            if (__processListeners != null)
+            string routine = "StateMod_DataSet.readStateModControlFile";
+            int line_num = 0;
+            string iline = null;
+            StreamReader @in = null;
+            String nextToken = null;
+
+            if (Message.isDebugOn)
             {
-                size = __processListeners.Count;
+                Message.printDebug(10, routine, "Reading control file \"" + filename + "\"");
             }
 
-            ProcessListener p = null;
-            for (int i = 0; i < size; i++)
+            try
             {
-                p = __processListeners[i];
-                p.processStatus(status, message);
+                @in = new StreamReader(filename);
+                while (!string.ReferenceEquals((iline = @in.ReadLine()), null))
+                {
+                    if (iline.StartsWith("#", StringComparison.Ordinal) || iline.Trim().Length == 0)
+                    {
+                        continue;
+                    }
+                    line_num++;
+                    char[] seps = { ' ', '\t', '\n', '\r', '\f' };
+                    String[] split = iline.Trim().Split(seps);
+                    if ((split == null) || (split.Length == 0))
+                    {
+                        continue;
+                    }
+                    nextToken = split[0];
+                    if (nextToken.Equals(":"))
+                    {
+                        continue;
+                    }
+                    switch (line_num)
+                    {
+                        // Non-comment lines
+                        case 1:
+                            setHeading1(iline);
+                            break;
+                        case 2:
+                            setHeading2(iline);
+                            break;
+                        case 3:
+                            setIystr(nextToken);
+                            break;
+                        case 4:
+                            setIyend(nextToken);
+                            break;
+                        case 5:
+                            setIresop(nextToken);
+                            break;
+                        case 6:
+                            setMoneva(nextToken);
+                            break;
+                        case 7:
+                            setIopflo(nextToken);
+                            break;
+                        case 8:
+                            setNumpre(nextToken);
+                            break;
+                        case 9:
+                            setNumeva(nextToken);
+                            break;
+                        case 10:
+                            setInterv(nextToken);
+                            break;
+                        case 11:
+                            setFactor(nextToken);
+                            break;
+                        case 12:
+                            setRfacto(nextToken);
+                            break;
+                        case 13:
+                            setDfacto(nextToken);
+                            break;
+                        case 14:
+                            setFfacto(nextToken);
+                            break;
+                        case 15:
+                            setCfacto(nextToken);
+                            break;
+                        case 16:
+                            setEfacto(nextToken);
+                            break;
+                        case 17:
+                            setPfacto(nextToken);
+                            break;
+                        case 18:
+                            setCyrl(nextToken);
+                            break;
+                        case 19:
+                            setIcondem(nextToken);
+                            break;
+                        case 20:
+                            setIchk(nextToken);
+                            break;
+                        case 21:
+                            setIreopx(nextToken);
+                            break;
+                        case 22:
+                            setIreach(nextToken);
+                            break;
+                        case 23:
+                            setIcall(nextToken);
+                            break;
+                        case 24:
+                            setCcall(nextToken);
+                            break;
+                        case 25:
+                            setIday(nextToken);
+                            break;
+                        case 26:
+                            setIwell(nextToken);
+                            break;
+                        case 27:
+                            setGwmaxrc(nextToken);
+                            break;
+                        case 28:
+                            setIsjrip(nextToken);
+                            break;
+                        case 29:
+                            setItsfile(nextToken);
+                            break;
+                        case 30:
+                            setIeffmax(nextToken);
+                            break;
+                        case 31:
+                            setIsprink(nextToken);
+                            break;
+                        case 32:
+                            setSoild(nextToken);
+                            break;
+                        case 33:
+                            setIsig(nextToken);
+                            break;
+                    }
+                }
             }
-        }
-
-        /// <summary>
-        /// Set number of precipitation stations. </summary>
-        /// <param name="numpre"> number of stations </param>
-        public virtual void setNumpre(int numpre)
-        {
-            if (numpre != __numpre)
+            catch (Exception e)
             {
-                __numpre = numpre;
-                setDirty(COMP_CONTROL, true);
+                Message.printWarning(2, routine, e);
+                throw e;
             }
-        }
-
-        /// <summary>
-        /// Set number of precipitation stations. </summary>
-        /// <param name="numpre"> number of stations </param>
-        public virtual void setNumpre(int? numpre)
-        {
-            setNumpre(numpre.Value);
-        }
-
-        /// <summary>
-        /// Set number of precipitation stations. </summary>
-        /// <param name="numpre"> number of stations </param>
-        public virtual void setNumpre(string numpre)
-        {
-            if (!string.ReferenceEquals(numpre, null))
+            finally
             {
-                setNumpre(int.Parse(numpre.Trim()));
+                if (@in != null)
+                {
+                    @in.Close();
+                }
             }
-        }
-
-        /// <summary>
-        /// Return a string representation of the data set definition information, useful for troubleshooting.
-        /// </summary>
-        private string toStringDefinitions()
-        {
-            StringBuilder b = new StringBuilder();
-            DataSetComponent comp = null;
-            //string nl = System.getProperty("line.separator");
-            for (int i = 0; i < __component_names.Length; i++)
-            {
-                comp = getComponentForComponentType(i);
-                b.Append("[" + i + "] Name=\"" + __component_names[i] + "\" Group=" + __component_group_assignments[i] + " RspProperty=\"" + __statemod_file_properties[i] + "\" Filename=\"" + comp.getDataFileName() + "\" Ext=\"" + __component_file_extensions[i] + "\" TSType=\"" + __component_ts_data_types[i] + "\" TSInt=" + __component_ts_data_intervals[i] + " TSUnits=\"" + __component_ts_data_units[i] + "\"" + "\n");
-            }
-            return b.ToString();
         }
 
         /// <summary>
@@ -3669,6 +4019,26 @@ namespace DWR.StateMod
         }
 
         /// <summary>
+        /// Send a message to ProcessListener that have been registered with this object.
+        /// This is usually a main application that is giving feedback to a user via the messages.
+        /// </summary>
+        public virtual void sendProcessListenerMessage(int status, string message)
+        {
+            int size = 0;
+            if (__processListeners != null)
+            {
+                size = __processListeners.Count;
+            }
+
+            ProcessListener p = null;
+            for (int i = 0; i < size; i++)
+            {
+                p = __processListeners[i];
+                p.processStatus(status, message);
+            }
+        }
+
+        /// <summary>
         /// Set a component dirty (edited).  This method is usually called by the set
         /// methods in the individual StateMod_Data classes.  This marks the component as
         /// dirty independent of the state of the individual data objects in the component.
@@ -3687,6 +4057,1026 @@ namespace DWR.StateMod
                 //	throw new RuntimeException ( "Find this");
                 //}
             }
+        }
+
+        /// <summary>
+        /// Set detailed call water right ID </summary>
+        /// <param name="ccall"> __ccall to set </param>
+        public virtual void setCcall(string ccall)
+        {
+            if ((!string.ReferenceEquals(ccall, null)) && !ccall.Equals(__ccall))
+            {
+                __ccall = ccall;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the factor for converting reservoir content data to AF </summary>
+        /// <param name="cfacto"> factor </param>
+        public virtual void setCfacto(double cfacto)
+        {
+            if (cfacto != __cfacto)
+            {
+                __cfacto = cfacto;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the factor for converting reservoir content data to AF </summary>
+        /// <param name="cfacto"> factor </param>
+        public virtual void setCfacto(double? cfacto)
+        {
+            setCfacto(cfacto.Value);
+        }
+
+        /// <summary>
+        /// Set the factor for converting reservoir content data to AF </summary>
+        /// <param name="cfacto"> factor </param>
+        public virtual void setCfacto(string cfacto)
+        {
+            if (!string.IsNullOrEmpty(cfacto))
+            {
+                setCfacto(double.Parse(cfacto.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the calendar/water/irrigation year </summary>
+        /// <param name="cyrl"> year type </param>
+        public virtual void setCyrl(int? cyrl)
+        {
+            setCyrl(cyrl.Value);
+        }
+
+        /// <summary>
+        /// Set the calendar/water/irrigation year </summary>
+        /// <param name="cyrl"> year type </param>
+        public virtual void setCyrl(YearType cyrl)
+        {
+            if (cyrl != __cyrl)
+            {
+                __cyrl = cyrl;
+                setDirty(COMP_CONTROL, true);
+            }
+            if (cyrl != YearType.CALENDAR && cyrl != YearType.WATER && cyrl != YearType.NOV_TO_OCT)
+            {
+                Message.printWarning(1, "StateMod_DataSet.setCyrl", "Setting year type using invalid value(" + cyrl + "); use SM_CYR, SM_WYR, or SM_IYR");
+            }
+        }
+
+        /// <summary>
+        /// Set the calendar/water/irrigation year </summary>
+        /// <param name="cyrl"> year type </param>
+        public virtual void setCyrl(string cyrl)
+        {
+            if (string.ReferenceEquals(cyrl, null))
+            {
+                return;
+            }
+            // expecting "CYR", "WYR", "IYR"
+            cyrl = cyrl.Trim();
+            if (cyrl.Equals("CYR", StringComparison.OrdinalIgnoreCase))
+            {
+                setCyrl(YearType.CALENDAR);
+            }
+            else if (cyrl.Equals("WYR", StringComparison.OrdinalIgnoreCase))
+            {
+                setCyrl(YearType.WATER);
+            }
+            else if (cyrl.Equals("IYR", StringComparison.OrdinalIgnoreCase))
+            {
+                setCyrl(YearType.NOV_TO_OCT);
+            }
+            else
+            {
+                Message.printWarning(1, "StateMod_Control.setCyrl", "Setting year type using invalid value(" + cyrl + "); use \"CYR\", \"WYR\", or \"IYR\"");
+                setCyrl(YearType.CALENDAR);
+            }
+        }
+
+        /// <summary>
+        /// Set the divisor for diversion data units </summary>
+        /// <param name="dfacto"> factor </param>
+        public virtual void setDfacto(double dfacto)
+        {
+            if (dfacto != __dfacto)
+            {
+                __dfacto = dfacto;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the divisor for diversion data units </summary>
+        /// <param name="dfacto"> factor </param>
+        public virtual void setDfacto(double? dfacto)
+        {
+            setDfacto(dfacto.Value);
+        }
+
+        /// <summary>
+        /// Set the divisor for diversion data units </summary>
+        /// <param name="dfacto"> factor </param>
+        public virtual void setDfacto(string dfacto)
+        {
+            if (!string.IsNullOrEmpty(dfacto))
+            {
+                setDfacto(double.Parse(dfacto.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the factor for converting evaporation data to FT </summary>
+        /// <param name="efacto"> factor </param>
+        public virtual void setEfacto(double efacto)
+        {
+            if (efacto != __efacto)
+            {
+                __efacto = efacto;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the factor for converting evaporation data to FT </summary>
+        /// <param name="efacto"> factor </param>
+        public virtual void setEfacto(double? efacto)
+        {
+            setEfacto(efacto.Value);
+        }
+
+        /// <summary>
+        /// Set the factor for converting evaporation data to FT </summary>
+        /// <param name="efacto"> factor </param>
+        public virtual void setEfacto(string efacto)
+        {
+            if (!string.IsNullOrEmpty(efacto))
+            {
+                setEfacto(double.Parse(efacto.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the divisor for instreamflow data units </summary>
+        /// <param name="ffacto"> factor </param>
+        public virtual void setFfacto(double ffacto)
+        {
+            if (ffacto != __ffacto)
+            {
+                __ffacto = ffacto;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the divisor for instreamflow data units </summary>
+        /// <param name="ffacto"> factor </param>
+        public virtual void setFfacto(double? ffacto)
+        {
+            setFfacto(ffacto.Value);
+        }
+
+        /// <summary>
+        /// Set the divisor for instreamflow data units </summary>
+        /// <param name="ffacto"> factor </param>
+        public virtual void setFfacto(string ffacto)
+        {
+            if (!string.IsNullOrEmpty(ffacto))
+            {
+                setFfacto(double.Parse(ffacto.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set factor for converting CFS to AF/Day (1.9835). </summary>
+        /// <param name="factor"> factor </param>
+        public virtual void setFactor(double factor)
+        {
+            if (factor != __factor)
+            {
+                __factor = factor;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set factor for converting CFS to AF/Day (1.9835). </summary>
+        /// <param name="factor"> factor </param>
+        public virtual void setFactor(double? factor)
+        {
+            setFactor(factor.Value);
+        }
+
+        /// <summary>
+        /// Set factor for converting CFS to AF/Day (1.9835). </summary>
+        /// <param name="factor"> factor </param>
+        public virtual void setFactor(string factor)
+        {
+            if (!string.IsNullOrEmpty(factor))
+            {
+                setFactor(double.Parse(factor.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set gwmaxrc
+        /// </summary>
+        public virtual void setGwmaxrc(double gwmaxrc)
+        {
+            if (gwmaxrc != __gwmaxrc)
+            {
+                __gwmaxrc = gwmaxrc;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set gwmaxrc
+        /// </summary>
+        public virtual void setGwmaxrc(double? gwmaxrc)
+        {
+            setGwmaxrc(gwmaxrc.Value);
+        }
+
+        /// <summary>
+        /// Set gwmaxrc
+        /// </summary>
+        public virtual void setGwmaxrc(string gwmaxrc)
+        {
+            if (!string.IsNullOrEmpty(gwmaxrc))
+            {
+                setGwmaxrc(double.Parse(gwmaxrc.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set first line of heading </summary>
+        /// <param name="heading1"> first line of text in file </param>
+        public virtual void setHeading1(string heading1)
+        {
+            if ((!string.ReferenceEquals(heading1, null)) && !heading1.Equals(__heading1))
+            {
+                __heading1 = heading1;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set second line of heading. </summary>
+        /// <param name="heading2"> second line of text in file. </param>
+        public virtual void setHeading2(string heading2)
+        {
+            if ((!string.ReferenceEquals(heading2, null)) && !heading2.Equals(__heading2))
+            {
+                __heading2 = heading2;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for detailed call data
+        /// </summary>
+        public virtual void setIcall(int icall)
+        {
+            if (icall != __icall)
+            {
+                __icall = icall;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for detailed call data
+        /// </summary>
+        public virtual void setIcall(int? icall)
+        {
+            setIcall(icall.Value);
+        }
+
+        /// <summary>
+        /// Set the switch for detailed call data
+        /// </summary>
+        public virtual void setIcall(string icall)
+        {
+            if (!string.IsNullOrEmpty(icall))
+            {
+                setIcall(int.Parse(icall.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for detailed printout. </summary>
+        /// <param name="ichk"> switch </param>
+        public virtual void setIchk(int ichk)
+        {
+            if (ichk != __ichk)
+            {
+                __ichk = ichk;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for detailed printout
+        /// </summary>
+        public virtual void setIchk(int? ichk)
+        {
+            setIchk(ichk.Value);
+        }
+
+        /// <summary>
+        /// Set the switch for detailed printout
+        /// </summary>
+        public virtual void setIchk(string ichk)
+        {
+            if (!string.IsNullOrEmpty(ichk))
+            {
+                setIchk(int.Parse(ichk.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for demand type </summary>
+        /// <param name="icondem"> __icondem to set </param>
+        public virtual void setIcondem(int icondem)
+        {
+            if (icondem != __icondem)
+            {
+                __icondem = icondem;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for demand type </summary>
+        /// <param name="icondem"> __icondem to set </param>
+        public virtual void setIcondem(int? icondem)
+        {
+            setIcondem(icondem.Value);
+        }
+
+        /// <summary>
+        /// Set the switch for demand type </summary>
+        /// <param name="icondem"> __icondem to set </param>
+        public virtual void setIcondem(string icondem)
+        {
+            if (!string.IsNullOrEmpty(icondem))
+            {
+                setIcondem(int.Parse(icondem.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for daily calculations
+        /// </summary>
+        public virtual void setIday(int iday)
+        {
+            if (iday != __iday)
+            {
+                __iday = iday;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for daily calculations
+        /// </summary>
+        public virtual void setIday(int? iday)
+        {
+            setIday(iday.Value);
+        }
+
+        /// <summary>
+        /// Set the switch for daily calculations
+        /// </summary>
+        public virtual void setIday(string iday)
+        {
+            if (!string.IsNullOrEmpty(iday))
+            {
+                setIday(int.Parse(iday.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for IWR. </summary>
+        /// <param name="ieffmax"> switch </param>
+        public virtual void setIeffmax(int ieffmax)
+        {
+            if (ieffmax != __ieffmax)
+            {
+                __ieffmax = ieffmax;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for IWR.
+        /// </summary>
+        public virtual void setIeffmax(int? ieffmax)
+        {
+            setIeffmax(ieffmax.Value);
+        }
+
+        /// <summary>
+        /// Set the switch for IWR.
+        /// </summary>
+        public virtual void setIeffmax(string ieffmax)
+        {
+            if (!string.IsNullOrEmpty(ieffmax))
+            {
+                setIeffmax(int.Parse(ieffmax.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set max number of entries in a delay pattern. </summary>
+        /// <param name="interv"> number of entries </param>
+        public virtual void setInterv(int interv)
+        {
+            if (interv != __interv)
+            {
+                __interv = interv;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set max number of entries in a delay pattern. </summary>
+        /// <param name="interv"> number of entries </param>
+        public virtual void setInterv(int? interv)
+        {
+            setInterv(interv.Value);
+        }
+
+        /// <summary>
+        /// Set max number of entries in a delay pattern. </summary>
+        /// <param name="interv"> number of entries </param>
+        public virtual void setInterv(string interv)
+        {
+            if (!string.IsNullOrEmpty(interv))
+            {
+                setInterv(int.Parse(interv.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set streamflow type.  Use SM_TOTAL or SM_GAINS. </summary>
+        /// <param name="iopflo"> streamflow type </param>
+        public virtual void setIopflo(int iopflo)
+        {
+            if (iopflo != __iopflo)
+            {
+                __iopflo = iopflo;
+                setDirty(COMP_CONTROL, true);
+            }
+
+            if (iopflo != SM_TOT && iopflo != SM_GAINS)
+            {
+                Message.printWarning(1, "StateMod_Control.setIopflo", "Setting iopflo using invalid value(" + iopflo + "); use SM_TOT or SM_GAINS");
+            }
+        }
+
+        /// <summary>
+        /// Set streamflow type. </summary>
+        /// <param name="iopflo"> streamflow type </param>
+        public virtual void setIopflo(int? iopflo)
+        {
+            setIopflo(iopflo.Value);
+        }
+
+        /// <summary>
+        /// Set streamflow type. </summary>
+        /// <param name="iopflo"> streamflow type </param>
+        public virtual void setIopflo(string iopflo)
+        {
+            if (!string.IsNullOrEmpty(iopflo))
+            {
+                int.TryParse(iopflo.Trim(), out int n);
+                setIopflo(n);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for instream flow reach approach
+        /// </summary>
+        public virtual void setIreach(int ireach)
+        {
+            if (ireach != __ireach)
+            {
+                __ireach = ireach;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for instream flow reach approach
+        /// </summary>
+        public virtual void setIreach(int? ireach)
+        {
+            setIreach(ireach.Value);
+        }
+
+        /// <summary>
+        /// Set the switch for instream flow reach approach
+        /// </summary>
+        public virtual void setIreach(string ireach)
+        {
+            if (!string.IsNullOrEmpty(ireach))
+            {
+                setIreach(int.Parse(ireach.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for reoperation control.
+        /// </summary>
+        public virtual void setIreopx(int ireopx)
+        {
+            if (ireopx != __ireopx)
+            {
+                __ireopx = ireopx;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for reoperation control
+        /// </summary>
+        public virtual void setIreopx(int? ireopx)
+        {
+            setIreopx(ireopx.Value);
+        }
+
+        /// <summary>
+        /// Set the switch for reoperation control
+        /// </summary>
+        public virtual void setIreopx(string ireopx)
+        {
+            if (!string.IsNullOrEmpty(ireopx))
+            {
+                setIreopx(int.Parse(ireopx.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set switch for output.  Use SM_CFS, SM_ACFT, SM_KACFT. </summary>
+        /// <param name="iresop"> switch </param>
+        public virtual void setIresop(int iresop)
+        {
+            if (iresop != __iresop)
+            {
+                __iresop = iresop;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set switch for output. </summary>
+        /// <param name="iresop"> switch </param>
+        public virtual void setIresop(int? iresop)
+        {
+            setIresop(iresop.Value);
+        }
+
+        /// <summary>
+        /// Set switch for output. </summary>
+        /// <param name="iresop"> switch </param>
+        public virtual void setIresop(string iresop)
+        {
+            if (!string.IsNullOrEmpty(iresop))
+            {
+                int.TryParse(iresop.Trim(), out int n);
+                setIresop(n);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for significant figures. </summary>
+        /// <param name="isig"> switch </param>
+        public virtual void setIsig(int isig)
+        {
+            if (isig != __isig)
+            {
+                __isig = isig;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for significant figures.
+        /// </summary>
+        public virtual void setIsig(int? isig)
+        {
+            setIsig(isig.Value);
+        }
+
+        /// <summary>
+        /// Set the switch for significant figures.
+        /// </summary>
+        public virtual void setIsig(string isig)
+        {
+            if (!string.IsNullOrEmpty(isig))
+            {
+                setIsig(int.Parse(isig.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for SJRIP. </summary>
+        /// <param name="isjrip"> switch </param>
+        public virtual void setIsjrip(int isjrip)
+        {
+            if (isjrip != __isjrip)
+            {
+                __isjrip = isjrip;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for SJRIP.
+        /// </summary>
+        public virtual void setIsjrip(int? isjrip)
+        {
+            setIsjrip(isjrip.Value);
+        }
+
+        /// <summary>
+        /// Set the switch for SJRIP.
+        /// </summary>
+        public virtual void setIsjrip(string isjrip)
+        {
+            if (!string.IsNullOrEmpty(isjrip))
+            {
+                setIsjrip(int.Parse(isjrip.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for sprinklers. </summary>
+        /// <param name="isprink"> switch </param>
+        public virtual void setIsprink(int isprink)
+        {
+            if (isprink != __isprink)
+            {
+                __isprink = isprink;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for sprinklers.
+        /// </summary>
+        public virtual void setIsprink(int? isprink)
+        {
+            setIsprink(isprink.Value);
+        }
+
+        /// <summary>
+        /// Set the switch for sprinklers.
+        /// </summary>
+        public virtual void setIsprink(string isprink)
+        {
+            if (!string.IsNullOrEmpty(isprink))
+            {
+                setIsprink(int.Parse(isprink.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for the ipy/tsp file. </summary>
+        /// <param name="itsfile"> switch </param>
+        public virtual void setItsfile(int itsfile)
+        {
+            if (itsfile != __itsfile)
+            {
+                __itsfile = itsfile;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for the ipy/tsp file.
+        /// </summary>
+        public virtual void setItsfile(int? itsfile)
+        {
+            setItsfile(itsfile.Value);
+        }
+
+        /// <summary>
+        /// Set the switch for the ipy/tsp file.
+        /// </summary>
+        public virtual void setItsfile(string itsfile)
+        {
+            if (!string.IsNullOrEmpty(itsfile))
+            {
+                setItsfile(int.Parse(itsfile.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for well calculations
+        /// </summary>
+        public virtual void setIwell(int iwell)
+        {
+            if (iwell != __iwell)
+            {
+                __iwell = iwell;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the switch for well calculations
+        /// </summary>
+        public virtual void setIwell(int? iwell)
+        {
+            setIwell(iwell.Value);
+        }
+
+        /// <summary>
+        /// Set the switch for well calculations
+        /// </summary>
+        public virtual void setIwell(string iwell)
+        {
+            if (!string.IsNullOrEmpty(iwell))
+            {
+                setIwell(int.Parse(iwell.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set ending year of the simulation. </summary>
+        /// <param name="iyend"> ending year </param>
+        public virtual void setIyend(int iyend)
+        {
+            if (iyend != __iyend)
+            {
+                __iyend = iyend;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set ending year of the simulation. </summary>
+        /// <param name="iyend"> ending year </param>
+        public virtual void setIyend(int? iyend)
+        {
+            setIyend(iyend.Value);
+        }
+
+        /// <summary>
+        /// Set ending year of the simulation. </summary>
+        /// <param name="iyend"> ending year </param>
+        public virtual void setIyend(string iyend)
+        {
+            if (!string.IsNullOrEmpty(iyend))
+            {
+                int.TryParse(iyend.Trim(), out int n);
+                setIyend(n);
+            }
+        }
+
+        /// <summary>
+        /// Set starting year of the simulation. </summary>
+        /// <param name="iystr"> starting year </param>
+        public virtual void setIystr(int iystr)
+        {
+            if (iystr != __iystr)
+            {
+                __iystr = iystr;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set starting year of the simulation. </summary>
+        /// <param name="iystr"> starting year </param>
+        public virtual void setIystr(int? iystr)
+        {
+            setIystr(iystr.Value);
+        }
+
+        /// <summary>
+        /// Set starting year of the simulation. </summary>
+        /// <param name="iystr"> starting year </param>
+        public virtual void setIystr(string iystr)
+        {
+            if (!string.IsNullOrEmpty(iystr))
+            {
+                int.TryParse(iystr.Trim(), out int n);
+                setIystr(n);
+            }
+        }
+
+        /// <summary>
+        /// Set type of evaporation data. Use SM_MONTHLY or SM_AVERAGE. </summary>
+        /// <param name="moneva"> type of evaporation data </param>
+        public virtual void setMoneva(int moneva)
+        {
+            if (moneva != __moneva)
+            {
+                __moneva = moneva;
+                setDirty(COMP_CONTROL, true);
+            }
+
+            if (moneva != SM_MONTHLY && moneva != SM_AVERAGE)
+            {
+                Message.printWarning(1, "StateMod_Control.setMoneva", "Setting moneva using invalid value(" + moneva + "); use SM_MONTHLY or SM_AVERAGE");
+            }
+        }
+
+        /// <summary>
+        /// Set type of evaporation data. </summary>
+        /// <param name="moneva"> type of evaporation data </param>
+        public virtual void setMoneva(int? moneva)
+        {
+            setMoneva(moneva.Value);
+        }
+
+        /// <summary>
+        /// Set type of evaporation data. </summary>
+        /// <param name="moneva"> type of evaporation data </param>
+        public virtual void setMoneva(string moneva)
+        {
+            if (!string.IsNullOrEmpty(moneva))
+            {
+                int.TryParse(moneva.Trim(), out int n);
+                setMoneva(n);
+            }
+        }
+
+        /// <summary>
+        /// Set number of evaporation stations. </summary>
+        /// <param name="numeva"> number of stations </param>
+        public virtual void setNumeva(int numeva)
+        {
+            if (numeva != __numeva)
+            {
+                __numeva = numeva;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set number of evaporation stations. </summary>
+        /// <param name="numeva"> number of stations </param>
+        public virtual void setNumeva(int? numeva)
+        {
+            setNumeva(numeva.Value);
+        }
+
+        /// <summary>
+        /// Set number of evaporation stations. </summary>
+        /// <param name="numeva"> number of stations </param>
+        public virtual void setNumeva(string numeva)
+        {
+            if (!string.IsNullOrEmpty(numeva))
+            {
+                setNumeva(int.Parse(numeva.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set number of precipitation stations. </summary>
+        /// <param name="numpre"> number of stations </param>
+        public virtual void setNumpre(int numpre)
+        {
+            if (numpre != __numpre)
+            {
+                __numpre = numpre;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set number of precipitation stations. </summary>
+        /// <param name="numpre"> number of stations </param>
+        public virtual void setNumpre(int? numpre)
+        {
+            setNumpre(numpre.Value);
+        }
+
+        /// <summary>
+        /// Set number of precipitation stations. </summary>
+        /// <param name="numpre"> number of stations </param>
+        public virtual void setNumpre(string numpre)
+        {
+            if (!string.IsNullOrEmpty(numpre))
+            {
+                int.TryParse(numpre.Trim(), out int n);
+                setNumpre(n);
+            }
+        }
+
+        /// <summary>
+        /// Set the factor for converting precipitation data to FT </summary>
+        /// <param name="pfacto"> factor </param>
+        public virtual void setPfacto(double pfacto)
+        {
+            if (pfacto != __pfacto)
+            {
+                __pfacto = pfacto;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set the factor for converting precipitation data to FT </summary>
+        /// <param name="pfacto"> factor </param>
+        public virtual void setPfacto(double? pfacto)
+        {
+            setPfacto(pfacto.Value);
+        }
+
+        /// <summary>
+        /// Set the factor for converting precipitation data to FT </summary>
+        /// <param name="pfacto"> factor </param>
+        public virtual void setPfacto(string pfacto)
+        {
+            if (!string.IsNullOrEmpty(pfacto))
+            {
+                setPfacto(double.Parse(pfacto.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set the divisor for streamflow data units. </summary>
+        /// <param name="rfacto"> factor </param>
+        public virtual void setRfacto(double rfacto)
+        {
+            if (rfacto != __rfacto)
+            {
+                __rfacto = rfacto;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+        /// <summary>
+        /// Set the divisor for streamflow data units. </summary>
+        /// <param name="rfacto"> factor </param>
+        public virtual void setRfacto(double? rfacto)
+        {
+            setRfacto(rfacto.Value);
+        }
+
+        /// <summary>
+        /// Set the divisor for streamflow data units. </summary>
+        /// <param name="rfacto"> factor </param>
+        public virtual void setRfacto(string rfacto)
+        {
+            if (!string.IsNullOrEmpty(rfacto))
+            {
+                setRfacto(double.Parse(rfacto.Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Set soild
+        /// </summary>
+        public virtual void setSoild(double soild)
+        {
+            if (soild != __soild)
+            {
+                __soild = soild;
+                setDirty(COMP_CONTROL, true);
+            }
+        }
+
+        /// <summary>
+        /// Set soild
+        /// </summary>
+        public virtual void setSoild(double? soild)
+        {
+            setSoild(soild.Value);
+        }
+
+        /// <summary>
+        /// Set soild
+        /// </summary>
+        public virtual void setSoild(string soild)
+        {
+            if (!string.IsNullOrEmpty(soild))
+            {
+                setSoild(double.Parse(soild.Trim()));
+            }
+        } 
+
+        /// <summary>
+        /// Return a string representation of the data set definition information, useful for troubleshooting.
+        /// </summary>
+        private string toStringDefinitions()
+        {
+            StringBuilder b = new StringBuilder();
+            DataSetComponent comp = null;
+            //string nl = System.getProperty("line.separator");
+            for (int i = 0; i < __component_names.Length; i++)
+            {
+                comp = getComponentForComponentType(i);
+                b.Append("[" + i + "] Name=\"" + __component_names[i] + "\" Group=" + __component_group_assignments[i] + " RspProperty=\"" + __statemod_file_properties[i] + "\" Filename=\"" + comp.getDataFileName() + "\" Ext=\"" + __component_file_extensions[i] + "\" TSType=\"" + __component_ts_data_types[i] + "\" TSInt=" + __component_ts_data_intervals[i] + " TSUnits=\"" + __component_ts_data_units[i] + "\"" + "\n");
+            }
+            return b.ToString();
         }
     }
 }

@@ -803,8 +803,15 @@ namespace DWR.StateMod
                             // Check to see if the year from the first line
                             // is different from the second line, and the
                             // identifiers are the same.  If so, assume one time series in the file...
-                            int line1_year = int.Parse(iline.Substring(0, 5).Trim());
-                            int line2_year = int.Parse(second_iline.Substring(0, 5).Trim());
+                            int line1_year = 0;
+                            if (!string.IsNullOrEmpty(iline.Substring(0, 5).Trim())){
+                                line1_year = int.Parse(iline.Substring(0, 5).Trim());
+                            }
+                            int line2_year = 0;
+                            if (!string.IsNullOrEmpty(second_iline.Substring(0, 5).Trim()))
+                            {
+                                line2_year = int.Parse(second_iline.Substring(0, 5).Trim());
+                            }
                             string line1_id = iline.Substring(5, 12).Trim();
                             string line2_id = second_iline.Substring(5, 12).Trim();
                             if (line1_id.Equals(line2_id) && (line1_year != line2_year))
@@ -2052,7 +2059,6 @@ namespace DWR.StateMod
             // Get the input file...
 
             prop_value = props.getValue("InputFile");
-            Debug.WriteLine(props.ToString());
             string infile = null; // Default
             if (!string.ReferenceEquals(prop_value, null))
             {
@@ -2065,7 +2071,7 @@ namespace DWR.StateMod
             prop_value = props.getValue("MissingDataValue");
             if (!string.ReferenceEquals(prop_value, null))
             {
-                MissingDV = StringUtil.atod(prop_value);
+                MissingDV = double.Parse(prop_value);
             }
 
             // Get the start of the period...

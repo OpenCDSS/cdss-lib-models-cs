@@ -15,4 +15,8 @@
     <ProjectReference Include="..\cdss-lib-common-cs\cdss-lib-common-cs.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Folder Include="src\DWR\StateCU\" />
+  </ItemGroup>
+
 </Project>
