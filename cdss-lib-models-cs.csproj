@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>netstandard2.0</TargetFramework>
-    <RootNamespace>cdss_lib_models_cs_class_lib_proj</RootNamespace>
+    <RootNamespace></RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
@@ -12,15 +12,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\cdss-lib-cdss-cs\cdss-lib-cdss-cs.csproj" />
     <ProjectReference Include="..\cdss-lib-common-cs\cdss-lib-common-cs.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Folder Include="src\DWR\StateCU\" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Newtonsoft.Json" Version="12.0.2" />
   </ItemGroup>
 
 </Project>
